@@ -1,1 +1,7 @@
-{"bulut":""}
+{
+  "bulut": "",
+  "kuratorlar": [
+    { "ism": "Tolipov Mansur", "guruhlar": ["PK2-TOQ-20", "PK2-JUFT-20", "PK3-JUFT-22", "G0010", "G0011"] },
+    { "ism": "Behruz Sayfiyev", "guruhlar": ["PK2-JUFT-05", "PK3-TOQ-05", "AT011"] }
+  ]
+}
