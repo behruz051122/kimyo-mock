@@ -22,16 +22,22 @@ Bulut rejimi: sayt bulutga ulangan bo'lsa, tugmalar istalgan qurilmadan (telefon
 so'rovlar bulutdagi navbatga tushadi, bu dastur ularni olib bajaradi. Birinchi ishga tushganda kurator
 kodi so'raladi (keyin eslab qolinadi). Keyinroq ulash uchun: python3 spektr_telegram.py --bulut
 
+Platforma: Spektr'dagi SJ (savol-javob) bali, konspekt va davomatni online.kelajakmediklari.uz ga
+SIZNING kurator akkauntingizdan yozadi. Birinchi marta platforma telefoni va paroli so'raladi (faqat shu
+kompyuterdagi spektr_telegram.json da saqlanadi). Qayta kiritish: python3 spektr_telegram.py --platforma
+
 Xavfsizlik: dastur faqat shu kompyuterdan (127.0.0.1) so'rov qabul qiladi, kalitsiz so'rovni rad etadi.
 Guruh/kanallarga yozadi; shaxsiy xabarni esa FAQAT tanlangan guruhning a'zolariga (o'quvchilarga) yuboradi —
 begona odamga yozmaydi. Telegram spam cheklovi (PeerFlood) chiqsa, darhol to'xtaydi.
 """
 
 import asyncio
+import getpass
 import hashlib
 import json
 import os
 import random
+import re
 import secrets
 import shutil
 import ssl
@@ -40,7 +46,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from http.cookiejar import CookieJar
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -66,6 +74,8 @@ BELGI_ORALIGI = 120  # soniya: saytga «yordamchi yoniq» belgisi
 SOZLAMA = PAPKA / "spektr_telegram.json"
 RUXSAT_SAYT = {"https://behruz051122.github.io"}
 RUXSAT_HOST = {"localhost", "127.0.0.1"}
+PLATFORMA_URL = os.environ.get("SPEKTR_PLATFORMA_URL", "https://online.kelajakmediklari.uz")
+TOSHKENT = timezone(timedelta(hours=5))
 
 
 def sozlamalar():
@@ -87,6 +97,11 @@ def sozlamalar():
         c["kalit"] = secrets.token_urlsafe(12)
     if "--bulut" in sys.argv:
         c.pop("bulut", None)
+    if "--platforma" in sys.argv:
+        c.pop("platforma", None)
+    if "platforma" not in c:
+        tel = input("Platforma (online.kelajakmediklari.uz) kurator telefoni — ballarni platformaga yozish uchun (bo'sh qoldirsangiz o'tkaziladi): ").strip()
+        c["platforma"] = {"tel": tel, "parol": getpass.getpass("Platforma paroli (yozganda ko'rinmaydi): ")} if tel else ""
     if bulut_sozlanganmi() and "bulut" not in c:
         kod = input("Kurator kodi (bulut uchun — telefon va Safari'dan ham yuborish; bo'sh qoldirsangiz faqat shu kompyuterdan): ").strip()
         c["bulut"] = bulut_kirish(kod) if kod else ""
@@ -230,7 +245,126 @@ class Bulut:
         self._yoz(ish["nom"], {"holat": "tayyor" if status == 200 else "xato", "status": status, "javob": json.dumps(data, ensure_ascii=False)})
 
 
+# ── Platforma (online.kelajakmediklari.uz): SJ, konspekt, davomat ──
+
+def rsc_matn(html):
+    """Next.js sahifasidagi server ma'lumoti (self.__next_f.push) — bitta matn."""
+    return "".join(json.loads('"' + c + '"') for c in re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, flags=re.S))
+
+
+def json_keyin(s, kalit):
+    """`"kalit":` dan keyingi JSON qiymat (topilmasa None)."""
+    i = s.find(f'"{kalit}":')
+    if i < 0:
+        return None
+    return json.JSONDecoder().raw_decode(s, i + len(kalit) + 3)[0]
+
+
+def mahalliy_sana(iso):
+    """«2026-10-24T15:36:00.000Z» → Toshkent sanasi «2026-10-24» (platforma ham kuratorning mahalliy sanasini oladi)."""
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TOSHKENT).date().isoformat()
+
+
+class Platforma:
+    """Kurator akkaunti bilan (sessiya cookie). Baho platformaning o'z sahifasi kabi /api/curator/lesson-grade ga yoziladi."""
+
+    MAYDONLAR = ("theoryScore", "konspektScore", "attendance")
+
+    def __init__(self, tel, parol):
+        self.tel, self.parol, self.kirgan = tel, parol, 0
+        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()), urllib.request.HTTPSHandler(context=SSL))
+
+    def _so(self, usul, yol, tana=None, forma=False):
+        sarlavha = {"Origin": PLATFORMA_URL, "Referer": PLATFORMA_URL + "/curator", "User-Agent": "Mozilla/5.0 (Spektr yordamchisi)"}
+        data = None
+        if tana is not None:
+            data = urllib.parse.urlencode(tana).encode() if forma else json.dumps(tana).encode()
+            sarlavha["Content-Type"] = "application/x-www-form-urlencoded" if forma else "application/json"
+        req = urllib.request.Request(PLATFORMA_URL + yol, data=data, method=usul, headers=sarlavha)
+        try:
+            with self.op.open(req, timeout=40) as r:
+                return r.status, r.geturl(), r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.geturl() or PLATFORMA_URL + yol, e.read().decode("utf-8", "replace")
+
+    def kir(self):
+        d = re.sub(r"\D", "", self.tel)[-9:]
+        _, url, _ = self._so("POST", "/api/auth/login", {"phone": f"+998 {d[:2]} {d[2:5]} {d[5:7]} {d[7:]}", "password": self.parol, "remember": "on"}, forma=True)
+        if "/curator" not in url:
+            raise RuntimeError("Platformaga kirib bo'lmadi: telefon yoki parol noto'g'ri (python3 spektr_telegram.py --platforma bilan qayta kiriting)")
+        self.kirgan = time.time()
+
+    def sahifa(self, yol):
+        if time.time() - self.kirgan > 1800:
+            self.kir()
+        st, url, html = self._so("GET", yol)
+        if "/login" in url or st in (401, 403):
+            self.kir()
+            st, url, html = self._so("GET", yol)
+        if st != 200:
+            raise RuntimeError(f"Platforma sahifasi ochilmadi ({st})")
+        return html
+
+    def guruh(self, gid):
+        s = rsc_matn(self.sahifa(f"/curator/groups/{urllib.parse.quote(gid)}"))
+        return {"oynalar": json_keyin(s, "initialWindows") or [], "baholar": json_keyin(s, "gradingInitial") or {}, "qotirilgan": json_keyin(s, "frozenDays") or []}
+
+    def yoz(self, gid, sid, lid, sana, maydon, qiymat):
+        tana = {"groupId": gid, "studentId": sid, "courseLessonId": lid, "lessonDate": sana, maydon: qiymat}
+        for i in range(3):
+            st, url, txt = self._so("POST", "/api/curator/lesson-grade", tana)
+            if st in (401, 403) or "/login" in url:
+                self.kir()
+                continue
+            try:
+                j = json.loads(txt or "{}")
+            except ValueError:
+                j = {}
+            if 200 <= st < 300 and j.get("ok"):
+                return None
+            if 400 <= st < 500:
+                return j.get("error") or f"platforma rad etdi ({st})"
+            time.sleep(0.5 * (i + 1))
+        return "platforma javob bermadi"
+
+    def baholar(self, d):
+        """d = {guruh: platformaId, sana: YYYY-MM-DD, baholar: [{k, studentId, theoryScore?, konspektScore?, attendance?}]}.
+        Dars (courseLessonId) — o'quvchining shu sanada ochilgan imtihon oynasidan; topilmasa — guruhda shu kuni eng ko'p ochilgan dars."""
+        gid, sana = str(d.get("guruh") or ""), str(d.get("sana") or "")
+        if not gid or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", sana):
+            raise ValueError("guruh yoki sana noto'g'ri")
+        g = self.guruh(gid)
+        if sana in g["qotirilgan"]:
+            return {"ok": False, "xato": "Bu kun platformada qotirilgan (natijalar guruhga yuborilgan) — baholarni o'zgartirib bo'lmaydi."}
+        kun = [w for w in g["oynalar"] if w.get("openFrom") and mahalliy_sana(w["openFrom"]) == sana]
+        if not kun:
+            return {"ok": False, "xato": f"Platformada {sana} kuni dars (imtihon oynasi) ochilmagan. Avval platformada shu dars uchun imtihon oynasini oching."}
+        asosiy = Counter(w["lessonId"] for w in kun).most_common(1)[0][0]
+        natija = []
+        for b in [x for x in d.get("baholar", []) if isinstance(x, dict)][:80]:
+            sid = str(b.get("studentId") or "")
+            ozi = [w for w in kun if w.get("studentId") == sid]
+            lid = asosiy if (not ozi or any(w["lessonId"] == asosiy for w in ozi)) else max(ozi, key=lambda w: w["openFrom"])["lessonId"]
+            xatolar = []
+            for m in self.MAYDONLAR:
+                if m not in b:
+                    continue
+                v = b[m]
+                if m != "attendance":
+                    v = None if v is None else max(0, min(100, int(round(float(v)))))
+                elif v not in ("PRESENT", "ABSENT", "EXCUSED"):
+                    continue
+                x = self.yoz(gid, sid, lid, sana, m, v)
+                if x:
+                    xatolar.append(f"{m}: {x}")
+            natija.append({"k": b.get("k"), "holat": "xato" if xatolar else "ok", "xato": "; ".join(xatolar) or None, "taxminiy": not ozi})
+            print(f"  platforma {len(natija)}: {'ok' if not xatolar else xatolar[0]}")
+        dars = next((w.get("lessonTitle") for w in kun if w["lessonId"] == asosiy), "")
+        return {"ok": True, "natija": natija, "dars": dars}
+
+
 C = sozlamalar()
+PLATFORMA = Platforma(C["platforma"]["tel"], C["platforma"]["parol"]) if C.get("platforma") else None
 client = TelegramClient(C["sessiya"], C["api_id"], C["api_hash"])
 
 
@@ -270,7 +404,11 @@ async def marshrut(usul, yol, sarlavha, tana):
     q = parse_qs(u.query)
     if usul == "GET" and u.path == "/holat":
         men = await client.get_me()
-        return 200, {"ok": True, "men": " ".join(x for x in [men.first_name, men.last_name] if x) or men.username or ""}
+        return 200, {"ok": True, "men": " ".join(x for x in [men.first_name, men.last_name] if x) or men.username or "", "platforma": bool(PLATFORMA)}
+    if usul == "POST" and u.path == "/platforma":
+        if not PLATFORMA:
+            return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
+        return 200, await asyncio.to_thread(PLATFORMA.baholar, json.loads(tana or b"{}"))
     if usul == "GET" and u.path == "/chatlar":
         chatlar = [{"id": str(d.id), "nom": d.name} async for d in client.iter_dialogs() if guruhmi(d)]
         return 200, {"ok": True, "chatlar": chatlar}
@@ -428,6 +566,12 @@ async def main():
     if C.get("bulut"):
         print(" Bulut: ulangan — tugmalar telefon va Safari'dan ham ishlaydi.")
         bulut_vazifa = asyncio.create_task(bulut_tsikli(" ".join(x for x in [men.first_name, men.last_name] if x) or men.username or ""))
+    if PLATFORMA:
+        try:
+            await asyncio.to_thread(PLATFORMA.kir)
+            print(" Platforma: ulangan — ballar online.kelajakmediklari.uz ga yoziladi.")
+        except Exception as e:  # noqa: BLE001
+            print(f" Platforma: {e}")
     print(" Saytda: Sozlamalar → Telegram → kalitni kiriting.")
     print(" To'xtatish: Ctrl+C. Oyna ochiq tursa, «Yubor» va «Hammaga shaxsan» tugmalari ishlaydi.")
     print("=" * 56)
