@@ -1,25 +1,31 @@
 """
 Spektr — Telegram yordamchisi (kurator kompyuterida ishlaydi).
 
-Sayt (kurator sahifasi) dars natijalarini o'quvchilar guruhiga SIZNING Telegram akkauntingizdan
-yuborishi uchun shu dastur kerak: sayt unga http://localhost:8765 orqali murojaat qiladi,
-dastur esa Telethon sessiyangiz orqali xabarni guruhga yuboradi.
+Sayt (kurator sahifasi) dars natijalarini o'quvchilar guruhiga va har o'quvchiga shaxsan SIZNING
+Telegram akkauntingizdan yuborishi uchun shu dastur kerak: sayt unga http://localhost:8765 orqali
+murojaat qiladi, dastur esa Telethon sessiyangiz orqali xabarni yuboradi.
 
 Ishga tushirish (Windows):
     pip install telethon
     set PYTHONIOENCODING=utf-8
     python spektr_telegram.py
 
+Ishga tushirish (Mac, Terminal):
+    pip3 install telethon cryptg
+    python3 spektr_telegram.py
+
 Birinchi marta: api_id, api_hash va mavjud sessiya fayli (masalan kimyo.session) so'raladi.
 Sessiya nusxasi shu papkaga olinadi («database is locked» bo'lmasligi uchun).
 Ekranda chiqqan KALIT ni saytdagi Sozlamalar → Telegram bo'limiga kiriting.
 
-Xavfsizlik: dastur faqat shu kompyuterdan (127.0.0.1) so'rov qabul qiladi, kalitsiz so'rovni rad etadi
-va faqat guruh/kanallarga yozadi — shaxsiy xabar yubormaydi.
+Xavfsizlik: dastur faqat shu kompyuterdan (127.0.0.1) so'rov qabul qiladi, kalitsiz so'rovni rad etadi.
+Guruh/kanallarga yozadi; shaxsiy xabarni esa FAQAT tanlangan guruhning a'zolariga (o'quvchilarga) yuboradi —
+begona odamga yozmaydi. Telegram spam cheklovi (PeerFlood) chiqsa, darhol to'xtaydi.
 """
 
 import asyncio
 import json
+import random
 import secrets
 import shutil
 import sys
@@ -34,6 +40,9 @@ except Exception:
 from telethon import TelegramClient, errors
 
 PORT = 8765
+# Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
+SHAXSIY_CHEGARA = 60
+SHAXSIY_PAUZA = (4, 8)
 PAPKA = Path(__file__).resolve().parent
 SOZLAMA = PAPKA / "spektr_telegram.json"
 RUXSAT_SAYT = {"https://behruz051122.github.io"}
@@ -81,6 +90,19 @@ async def chat_ol(chat):
     return await client.get_entity(n)
 
 
+async def bitta_yubor(kimga, matn):
+    """Bitta xabar: qisqa FloodWait'ni kutib, 3 marta urinadi; uzun kutish (5 daqiqadan ko'p) — xato."""
+    for _ in range(3):
+        try:
+            return await client.send_message(kimga, matn, parse_mode="html", link_preview=False)
+        except errors.FloodWaitError as e:
+            if e.seconds > 300:
+                raise
+            print(f"Telegram cheklovi: {e.seconds} s kutilmoqda…")
+            await asyncio.sleep(e.seconds + 1)
+    raise RuntimeError("Telegram cheklovi: 3 marta urinildi, yuborilmadi")
+
+
 async def marshrut(usul, yol, sarlavha, tana):
     if sarlavha.get("x-spektr-kalit") != C["kalit"]:
         return 401, {"ok": False, "xato": "Kalit noto'g'ri — saytga dasturdagi KALIT ni kiriting"}
@@ -109,17 +131,44 @@ async def marshrut(usul, yol, sarlavha, tana):
             await client.get_participants(ent)
         n = 0
         for x in xabarlar:
-            for urinish in range(3):
-                try:
-                    await client.send_message(ent, x, parse_mode="html", link_preview=False)
-                    break
-                except errors.FloodWaitError as e:
-                    print(f"Telegram cheklovi: {e.seconds} s kutilmoqda…")
-                    await asyncio.sleep(e.seconds + 1)
+            await bitta_yubor(ent, x)
             n += 1
             print(f"  yuborildi {n}/{len(xabarlar)}")
             await asyncio.sleep(1.2)
         return 200, {"ok": True, "yuborildi": n}
+    if usul == "POST" and u.path == "/shaxsiy":
+        # Har o'quvchiga shaxsan — faqat shu guruhning a'zolariga (ID yoki username bo'yicha topiladi).
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("Shaxsiy xabar uchun o'quvchilar guruhi tanlanishi kerak")
+        azolar = [a for a in await client.get_participants(ent) if not a.bot and not a.deleted]
+        by_id = {str(a.id): a for a in azolar}
+        by_un = {a.username.lower(): a for a in azolar if a.username}
+        qabul = [q for q in d.get("qabul", []) if isinstance(q, dict)][:SHAXSIY_CHEGARA]
+        natija = []
+        for i, q in enumerate(qabul):
+            k = str(q.get("k", ""))
+            a = by_id.get(str(q.get("id") or "")) or by_un.get(str(q.get("username") or "").lstrip("@").lower())
+            if not a:
+                natija.append({"k": k, "holat": "topilmadi"})
+                continue
+            xabarlar = [x for x in q.get("xabarlar", []) if isinstance(x, str) and x.strip()][:10]
+            try:
+                for x in xabarlar:
+                    await bitta_yubor(a, x)
+                natija.append({"k": k, "holat": "ok"})
+                print(f"  shaxsan {i + 1}/{len(qabul)}: {a.first_name or a.id}")
+            except (errors.PeerFloodError, errors.FloodWaitError):
+                natija.append({"k": k, "holat": "flood"})
+                return 200, {"ok": True, "natija": natija, "toxtadi": "Telegram spam cheklovi: qolganlarga yuborilmadi. Bir necha soatdan keyin qayta urinib ko'ring."}
+            except (errors.UserIsBlockedError, errors.YouBlockedUserError, errors.UserPrivacyRestrictedError, errors.InputUserDeactivatedError, errors.PeerIdInvalidError) as e:
+                natija.append({"k": k, "holat": "rad", "xato": type(e).__name__})
+            except Exception as e:  # noqa: BLE001
+                natija.append({"k": k, "holat": "xato", "xato": str(e)})
+            if i < len(qabul) - 1:
+                await asyncio.sleep(random.uniform(*SHAXSIY_PAUZA))
+        return 200, {"ok": True, "natija": natija}
     return 404, {"ok": False, "xato": "Topilmadi"}
 
 
@@ -184,7 +233,7 @@ async def main():
     print(f" Akkaunt: {men.first_name or ''} {men.last_name or ''} (@{men.username or '-'})")
     print(f" KALIT: {C['kalit']}")
     print(" Saytda: Sozlamalar → Telegram → kalitni kiriting.")
-    print(" To'xtatish: Ctrl+C. Oyna ochiq tursa, «Yubor» tugmasi ishlaydi.")
+    print(" To'xtatish: Ctrl+C. Oyna ochiq tursa, «Yubor» va «Hammaga shaxsan» tugmalari ishlaydi.")
     print("=" * 56)
     async with server:
         await server.serve_forever()
