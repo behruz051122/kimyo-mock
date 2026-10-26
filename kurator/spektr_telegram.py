@@ -32,6 +32,7 @@ begona odamga yozmaydi. Telegram spam cheklovi (PeerFlood) chiqsa, darhol to'xta
 """
 
 import asyncio
+import copy
 import getpass
 import hashlib
 import json
@@ -397,6 +398,30 @@ async def bitta_yubor(kimga, matn):
     raise RuntimeError("Telegram cheklovi: 3 marta urinildi, yuborilmadi")
 
 
+def _u16(s):
+    return len(s.encode("utf-16-le")) // 2
+
+
+def matn_almashtir(matn, belgilar, eski, yangi):
+    """Telegram xabaridagi `eski` ni `yangi` ga almashtiradi, formatlash (qalin, izoh bloki…) o'rnini siljitadi.
+    Telegram o'rinlari UTF-16 birliklarida."""
+    belgilar = [copy.copy(e) for e in (belgilar or [])]
+    farq = _u16(yangi) - _u16(eski)
+    qidir = 0
+    while True:
+        i = matn.find(eski, qidir)
+        if i < 0:
+            return matn, belgilar
+        bosh, oxir = _u16(matn[:i]), _u16(matn[:i]) + _u16(eski)
+        for e in belgilar:
+            if e.offset >= oxir:
+                e.offset += farq
+            elif e.offset <= bosh and e.offset + e.length >= oxir:
+                e.length += farq
+        matn = matn[:i] + yangi + matn[i + len(eski):]
+        qidir = i + len(yangi)
+
+
 async def marshrut(usul, yol, sarlavha, tana):
     if sarlavha.get("x-spektr-kalit") != C["kalit"]:
         return 401, {"ok": False, "xato": "Kalit noto'g'ri — saytga dasturdagi KALIT ni kiriting"}
@@ -472,6 +497,43 @@ async def marshrut(usul, yol, sarlavha, tana):
                 natija.append({"k": k, "holat": "xato", "xato": str(e)})
             if i < len(qabul) - 1:
                 await asyncio.sleep(random.uniform(*SHAXSIY_PAUZA))
+        return 200, {"ok": True, "natija": natija}
+    if usul == "POST" and u.path == "/tahrir":
+        # Yuborilgan xabarni tuzatish (masalan, «Bugungi» → «24-oktabrdagi»): faqat shu guruhning a'zolariga
+        # O'ZIMIZ yuborgan, oxirgi `soat` (≤72) ichidagi va `eski` matni bor xabarlar. Yangi xabar yuborilmaydi.
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("Tahrir uchun o'quvchilar guruhi tanlanishi kerak")
+        eski, yangi = str(d.get("eski") or ""), str(d.get("yangi") or "")
+        if len(eski) < 5 or not yangi or eski == yangi:
+            raise ValueError("eski (kamida 5 belgi) va yangi matn kerak")
+        chegara = datetime.now(timezone.utc) - timedelta(hours=min(72, int(d.get("soat") or 48)))
+        azolar = [a for a in await client.get_participants(ent) if not a.bot and not a.deleted]
+        by_id = {str(a.id): a for a in azolar}
+        by_un = {a.username.lower(): a for a in azolar if a.username}
+        natija = []
+        for q in [q for q in d.get("qabul", []) if isinstance(q, dict)][:SHAXSIY_CHEGARA]:
+            k = str(q.get("k", ""))
+            a = by_id.get(str(q.get("id") or "")) or by_un.get(str(q.get("username") or "").lstrip("@").lower())
+            if not a:
+                natija.append({"k": k, "holat": "topilmadi"})
+                continue
+            n = 0
+            try:
+                async for m in client.iter_messages(a, limit=30):
+                    if m.date < chegara:
+                        break
+                    if not m.out or not m.message or eski not in m.message:
+                        continue
+                    yangi_matn, belgilar = matn_almashtir(m.message, m.entities, eski, yangi)
+                    await client.edit_message(a, m.id, yangi_matn, formatting_entities=belgilar, link_preview=False)
+                    n += 1
+                natija.append({"k": k, "holat": "ok" if n else "yoq", "tahrir": n})
+                print(f"  tahrir: {a.first_name or a.id} — {n} ta")
+            except Exception as e:  # noqa: BLE001
+                natija.append({"k": k, "holat": "xato", "xato": str(e)})
+            await asyncio.sleep(1.5)
         return 200, {"ok": True, "natija": natija}
     return 404, {"ok": False, "xato": "Topilmadi"}
 
