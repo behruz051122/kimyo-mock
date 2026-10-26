@@ -26,6 +26,10 @@ Platforma: Spektr'dagi SJ (savol-javob) bali, konspekt va davomatni online.kelaj
 SIZNING kurator akkauntingizdan yozadi. Birinchi marta platforma telefoni va paroli so'raladi (faqat shu
 kompyuterdagi spektr_telegram.json da saqlanadi). Qayta kiritish: python3 spektr_telegram.py --platforma
 
+Haftalik hisobot: har yakshanba 20:00 da (kompyuter o'chiq bo'lsa — dushanba 12:00 gacha) shu hafta darslari,
+kelish, o'rtacha ball, ketma-ket NB, qolib ketgan ishlar, to'lovi tugaganlar va komissiya — FAQAT sizning
+«Saqlangan xabarlar» ingizga yuboriladi (bulut rejimida). O'chirish: saytda Sozlamalar → Telegram.
+
 Xavfsizlik: dastur faqat shu kompyuterdan (127.0.0.1) so'rov qabul qiladi, kalitsiz so'rovni rad etadi.
 Guruh/kanallarga yozadi; shaxsiy xabarni esa FAQAT tanlangan guruhning a'zolariga (o'quvchilarga) yuboradi —
 begona odamga yozmaydi. Telegram spam cheklovi (PeerFlood) chiqsa, darhol to'xtaydi.
@@ -60,6 +64,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
+VERSIYA = "2026.10.27"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -72,6 +77,7 @@ FB_PROJECT = "spektr-kurator"
 FB_EMULYATOR = os.environ.get("SPEKTR_FB_EMU") == "1"  # sinov uchun (Firebase emulyatori)
 NAVBAT_ORALIGI = 8  # soniya: navbat shunchalik tez-tez tekshiriladi
 BELGI_ORALIGI = 120  # soniya: saytga «yordamchi yoniq» belgisi
+PLATFORMA_ORALIGI = 6 * 3600  # soniya: platformadan guruhlar, to'lovlar va komissiya shunchalik tez-tez olinadi
 SOZLAMA = PAPKA / "spektr_telegram.json"
 RUXSAT_SAYT = {"https://behruz051122.github.io"}
 RUXSAT_HOST = {"localhost", "127.0.0.1"}
@@ -219,9 +225,43 @@ class Bulut:
             w["currentDocument"] = {"updateTime": shart}
         return http("POST", self.commit, {"writes": [w]}, self._token())
 
-    def belgi(self, men):
-        """Saytga: yordamchi yoniq (qaysi akkaunt, qachon)."""
-        self._yoz(f"{self.nom}/yordamchi/holat", {"men": men, "vaqt": datetime.now(timezone.utc)})
+    def belgi(self, men, **qoshimcha):
+        """Saytga: yordamchi yoniq (qaysi akkaunt, qachon, versiya, platforma ulanganmi)."""
+        self._yoz(f"{self.nom}/yordamchi/holat", {"men": men, "vaqt": datetime.now(timezone.utc), "versiya": VERSIYA, **qoshimcha})
+
+    def platforma_yoz(self, malumot):
+        """Platformadan olingan import fayli — sayt shu hujjatni tinglaydi va o'zi qo'llaydi."""
+        st, r = self._yoz(f"{self.nom}/platforma/oxirgi", {"json": json.dumps(malumot, ensure_ascii=False), "vaqt": datetime.now(timezone.utc), "kurator": malumot.get("kurator", "")})
+        if st != 200:
+            raise RuntimeError(f"platforma ma'lumoti bulutga yozilmadi ({st}): {r}")
+
+    def _sorov(self, so):
+        st, r = http("POST", self.asos + ":runQuery", {"structuredQuery": so}, self._token())
+        if st != 200:
+            raise RuntimeError(f"bulutdan o'qib bo'lmadi ({st}): {r}")
+        return [x["document"] for x in r if x.get("document")]
+
+    def yozuvlar(self, kun=16):
+        """Saytning ma'lumoti (faqat o'qish): guruhlar, o'quvchilar, sozlamalar — hammasi; darslar, jurnal, holatlar —
+        oxirgi `kun` kunda o'zgarganlari (hisobotga shu yetadi, bepul limit tejaladi). → {kolleksiya: [yozuv, ...]}"""
+        fr = [{"collectionId": "yozuvlar"}]
+        kollar = {"arrayValue": {"values": [{"stringValue": k} for k in ("guruhlar", "oquvchilar", "sozlamalar")]}}
+        hujjatlar = self._sorov({"from": fr, "where": {"fieldFilter": {"field": {"fieldPath": "k"}, "op": "IN", "value": kollar}}})
+        dan = datetime.now(timezone.utc) - timedelta(days=kun)
+        hujjatlar += self._sorov({"from": fr, "where": {"fieldFilter": {"field": {"fieldPath": "t"}, "op": "GREATER_THAN_OR_EQUAL", "value": fs_qiymat(dan)}}})
+        eng = {}
+        for h in hujjatlar:
+            f = h.get("fields", {})
+            k, i = fs_matn(f.get("k")), fs_matn(f.get("i"))
+            v = f.get("v", {})
+            v = float(v.get("integerValue") or v.get("doubleValue") or 0)
+            if k and i is not None and ((k, i) not in eng or v > eng[(k, i)][0]):
+                eng[(k, i)] = (v, fs_matn(f.get("d")))
+        baza = {}
+        for (k, _), (_, d) in eng.items():
+            if d:
+                baza.setdefault(k, []).append(json.loads(d))
+        return baza
 
     def navbat(self):
         so = {"structuredQuery": {"from": [{"collectionId": "navbat"}], "where": {"fieldFilter": {"field": {"fieldPath": "holat"}, "op": "EQUAL", "value": {"stringValue": "kutilmoqda"}}}, "limit": 10}}
@@ -264,6 +304,88 @@ def json_keyin(s, kalit):
 def mahalliy_sana(iso):
     """«2026-10-24T15:36:00.000Z» → Toshkent sanasi «2026-10-24» (platforma ham kuratorning mahalliy sanasini oladi)."""
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TOSHKENT).date().isoformat()
+
+
+def html_qatorlar(html):
+    """Sahifadagi ko'rinadigan matn — qator-qator (skriptlarsiz)."""
+    import html as H
+
+    t = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+    t = re.sub(r"<[^>]+>", "\n", t)
+    return [H.unescape(x).strip() for x in t.split("\n") if x.strip()]
+
+
+def _iso(x, sep):
+    return "-".join(reversed(x.split(sep)))
+
+
+def _som(x):
+    return int(re.sub(r"\D", "", x) or 0)
+
+
+def komissiya_sahifasi(L, birinchi):
+    """«Komissiya» sahifasining matn qatorlaridan: balans (1-sahifada), so'rovlar (karta raqamisiz) va to'lov yozuvlari."""
+    try:
+        i = L.index("Davrlar bo'yicha tarix")
+    except ValueError:
+        return None
+    balans, sorovlar, tolovlar = {}, [], []
+    if birinchi:
+        for nom, kalit in [("To'ladi", "toladi"), ("Tekshirildi", "tekshirildi"), ("Yechildi", "yechildi"), ("Olishingiz mumkin", "olishMumkin"), ("Kutilayotgan", "kutilayotgan"), ("Sovish davrida", "sovishda"), ("Qarzdorlik (avans)", "qarz")]:
+            if nom in L[:i]:
+                k = L.index(nom)
+                q = next((x for x in L[k + 1:k + 4] if "so'm" in x), None)
+                if q:
+                    balans[kalit] = _som(q)
+        j0 = L.index("So'ngi so'rovlar") if "So'ngi so'rovlar" in L[:i] else i
+        for k in range(j0, i - 4):
+            if re.fullmatch(r"\d\d\.\d\d\.\d{4} \d\d:\d\d", L[k]) and L[k + 1] in ("Avans", "Yechish") and "so'm" in L[k + 2]:
+                sorovlar.append({"sana": _iso(L[k][:10], "."), "tur": L[k + 1], "summa": _som(L[k + 2]), "holat": next((x for x in L[k + 3:k + 6] if x in ("Tasdiqlandi", "Rad etildi", "Kutilmoqda", "Kutilayotgan")), "")})
+    for k in range(i, len(L) - 10):
+        if not re.fullmatch(r"\d\d\.\d\d\.\d{4} \d\d:\d\d", L[k]):
+            continue
+        j = k + 1 if L[k + 1].startswith("+") else k + 2
+        if not re.fullmatch(r"\+?\d{9,12}", L[j]) or L[j + 4] != "–":
+            continue
+        tolovlar.append({"sana": _iso(L[k][:10], "."), "ism": L[k + 1] if j == k + 2 else "", "tel": L[j][-9:], "guruh": L[j + 1], "bosh": _iso(L[j + 3], "/"),
+                         "tugash": _iso(L[j + 5], "/"), "summa": _som(L[j + 6]), "mavjud": _iso(L[j + 7], "/"), "holat": L[j + 8]})
+    return {"balans": balans, "sorovlar": sorovlar, "tolovlar": tolovlar, "keyingi": "Keyingi" in " ".join(L[-5:])}
+
+
+def toplam_yig(guruhlar, oquvchilar, kurator, sahifalar, bugun=None):
+    """Guruhlar, o'quvchilar va komissiya sahifalaridan saytga import fayli («spektr-guruhlar/1»):
+    o'quvchining to'lov sanasi — komissiyadagi eng oxirgi davri (telefon + guruh bo'yicha). Karta raqami olinmaydi."""
+    bugun = bugun or datetime.now(TOSHKENT).date()
+    balans, sorovlar, tolovlar = {}, [], []
+    for n, x in enumerate(sahifalar):
+        if n == 0:
+            balans, sorovlar = x["balans"], x["sorovlar"]
+        tolovlar += x["tolovlar"]
+    chegara = (bugun.replace(day=1) - timedelta(days=40)).replace(day=1).isoformat()
+    faol = [x for x in tolovlar if not x["holat"].startswith("Qaytar")]
+    gnom = {g["platformaId"]: g["nom"] for g in guruhlar}
+    for o in oquvchilar:
+        t = re.sub(r"\D", "", o.get("telefon") or "")[-9:]
+        mos = [x for x in faol if t and x["tel"] == t and x["guruh"] == gnom.get(o["guruhPlatformaId"])] or [x for x in faol if t and x["tel"] == t]
+        if mos:
+            x = max(mos, key=lambda x: (x["tugash"], x["sana"]))
+            o["tolovSana"], o["tolovTugash"] = x["sana"], x["tugash"]
+            if not o["ism"] and x["ism"]:
+                o["ism"] = x["ism"]
+    return {
+        "format": "spektr-guruhlar/1",
+        "manba": "online.kelajakmediklari.uz",
+        "kurator": kurator,
+        "guruhlar": guruhlar,
+        "oquvchilar": oquvchilar,
+        "komissiya": {
+            "yangilangan": datetime.now(TOSHKENT).isoformat(timespec="minutes")[:16],
+            "balans": balans,
+            "sorovlar": sorovlar[:30],
+            "jami": len(tolovlar),
+            "yozuvlar": [{**{k: v for k, v in x.items() if k != "tel"}, "tel": x["tel"][-4:]} for x in tolovlar if max(x["sana"], x["mavjud"]) >= chegara],
+        },
+    }
 
 
 class Platforma:
@@ -328,6 +450,43 @@ class Platforma:
             time.sleep(0.5 * (i + 1))
         return "platforma javob bermadi"
 
+    def toplam(self):
+        """Aktiv guruhlar, o'quvchilar (telefon bilan), to'lov sanalari va komissiya — saytga import fayli (dict)."""
+        st = self.sahifa("/curator/students")
+        ids = list(dict.fromkeys(re.findall(r'href="/curator/groups/([0-9a-f-]+)"', st)))
+        L, gs, cur = html_qatorlar(st), [], None
+        for i, x in enumerate(L):
+            if x == "Gurux:" and i + 1 < len(L):
+                cur = {"nom": L[i + 1]}
+                gs.append(cur)
+            elif cur is not None and x.endswith(":") and i + 1 < len(L):
+                cur[x[:-1]] = L[i + 1]
+        for g, i in zip(gs, ids):
+            g["id"] = i
+        kurator = next((g.get("Kuratori") for g in gs if g.get("Kuratori")), "")
+        guruhlar, oquvchilar = [], []
+        for g in gs:
+            if not g.get("id") or g.get("Status") != "BOSHLANGAN" or int(g.get("Aktiv o'quvchi", "0") or 0) == 0:
+                continue
+            s = rsc_matn(self.sahifa(f"/curator/groups/{g['id']}"))
+            m = re.search(r'"students":\[\{"id".*?\]\}', s)
+            if not m:
+                continue
+            for x in json.loads(s[m.start() + len('"students":'):m.end() - 1]):
+                k = s.find(f'/student/{x["id"]}"')
+                tel = re.findall(r'"children":"(\+998\d{9})"', s[max(0, k - 1500):k]) if k >= 0 else []
+                oquvchilar.append({"platformaUuid": x["id"], "ism": (x.get("fullName") or "").strip(), "telefon": tel[-1] if tel else "", "guruhPlatformaId": g["id"]})
+            guruhlar.append({"platformaId": g["id"], "nom": g["nom"], "kunlar": g.get("Kunlar"), "vaqt": g.get("Vaqti")})
+        sahifalar = []
+        for n in range(1, 60):
+            x = komissiya_sahifasi(html_qatorlar(self.sahifa(f"/curator/komissiya?page={n}")), n == 1)
+            if not x:
+                break
+            sahifalar.append(x)
+            if not x["keyingi"]:
+                break
+        return toplam_yig(guruhlar, oquvchilar, kurator, sahifalar)
+
     def baholar(self, d):
         """d = {guruh: platformaId, sana: YYYY-MM-DD, baholar: [{k, studentId, theoryScore?, konspektScore?, attendance?}]}.
         Dars (courseLessonId) — o'quvchining shu sanada ochilgan imtihon oynasidan; topilmasa — guruhda shu kuni eng ko'p ochilgan dars."""
@@ -364,9 +523,303 @@ class Platforma:
         return {"ok": True, "natija": natija, "dars": dars}
 
 
+# ── Haftalik hisobot: FAQAT kuratorning o'ziga (Saqlangan xabarlar) — o'quvchiga hech qachon ──
+# To'lov va komissiya shu yerda bor, shuning uchun hisobot boshqa hech qayerga yuborilmaydi.
+
+HISOBOT_SOAT = 20  # yakshanba, Toshkent vaqti; kompyuter o'sha payt o'chiq bo'lsa — dushanba 12:00 gacha
+OYLAR = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"]
+DARAJA_VAZN = {1: 0.5, 2: 1, 3: 1.5}
+
+
+def _e(x):
+    import html as H
+
+    return H.escape(str(x or ""), quote=False)
+
+
+def _kun(iso):
+    return f"{iso[8:10]}.{iso[5:7]}"
+
+
+def _oraliq(dan, gacha):
+    d, g = date_iso(dan), date_iso(gacha)
+    if d.month == g.month:
+        return f"{d.day}–{g.day}-{OYLAR[g.month - 1]}"
+    return f"{d.day}-{OYLAR[d.month - 1]} – {g.day}-{OYLAR[g.month - 1]}"
+
+
+def date_iso(s):
+    return datetime.strptime(s[:10], "%Y-%m-%d").date()
+
+
+def _somm(n):
+    return f"{int(round(n)):,}".replace(",", " ") + " so'm"
+
+
+def vaznli_ball(js):
+    """Saytdagi vaznliBall bilan bir xil: Σ(ball × vazn) / Σ vazn, daraja vazni 0,5 / 1 / 1,5."""
+    if not js:
+        return None
+    s = sum(j["ball"] * DARAJA_VAZN.get(j.get("daraja"), 1) for j in js)
+    w = sum(DARAJA_VAZN.get(j.get("daraja"), 1) for j in js)
+    return round(s / w)
+
+
+def davomat_ol(d, oid):
+    x = (d.get("davomat") or {}).get(oid)
+    if x:
+        return x
+    return {"holat": "sababsiz"} if oid in (d.get("yoqlar") or []) else {"holat": "bor"}
+
+
+def _ortacha(xs):
+    xs = [x for x in xs if x is not None]
+    return round(sum(xs) / len(xs)) if xs else None
+
+
+def _ismlar(xs, n=5):
+    xs = list(xs)
+    q = ", ".join(xs[:n])
+    return q + (f" va yana {len(xs) - n}" if len(xs) > n else "")
+
+
+def _farq(a, b):
+    if a is None or b is None or a == b:
+        return ""
+    return f" ({'▲' if a > b else '▼'}{abs(a - b)})"
+
+
+def hafta_oraligi(bugun):
+    """Hisobot haftasi: dushanba – yakshanba. Dushanba kuni — o'tgan hafta (kechikkan avtomatik hisobot), boshqa kunlari — shu hafta."""
+    bosh = bugun - timedelta(days=bugun.weekday() + (7 if bugun.weekday() == 0 else 0))
+    return bosh.isoformat(), (bosh + timedelta(days=6)).isoformat()
+
+
+def hisobot_vaqtimi(hozir, oxirgi):
+    """Avtomatik yuborish vaqti bo'lsa — hafta kaliti (yakshanba sanasi), aks holda None. Har hafta bir marta."""
+    if hozir.weekday() == 6 and hozir.hour >= HISOBOT_SOAT:
+        kalit = hozir.date().isoformat()
+    elif hozir.weekday() == 0 and hozir.hour < 12:
+        kalit = (hozir.date() - timedelta(days=1)).isoformat()
+    else:
+        return None
+    return None if kalit == oxirgi else kalit
+
+
+def hisobot_yig(baza, bugun, platforma=None):
+    """Kuratorga haftalik hisobot (Telegram HTML, bo'laklarga bo'lingan). baza — bulutdagi yozuvlar,
+    platforma — yordamchi platformadan olgan oxirgi ma'lumot (to'lov sanalari va komissiya yangiroq bo'lsa)."""
+    bugun_s = bugun.isoformat()
+    dan, gacha = hafta_oraligi(bugun)
+    odan, ogacha = (date_iso(dan) - timedelta(days=7)).isoformat(), (date_iso(dan) - timedelta(days=1)).isoformat()
+    soz = next(iter(baza.get("sozlamalar", [])), {})
+    guruhlar = sorted(baza.get("guruhlar", []), key=lambda g: g.get("nom", ""))
+    oquvchilar = [o for o in baza.get("oquvchilar", []) if o.get("faol")]
+    darslar = [d for d in baza.get("darslar", []) if d.get("holat") != "tayyor"]
+    jurnal = baza.get("jurnal", [])
+
+    # Platformadan yangi to'lov sanalari; platformada guruhdan chiqqanlar «guruhda» hisoblanmaydi.
+    pl_oq = {x["platformaUuid"]: x for x in (platforma or {}).get("oquvchilar", []) if x.get("platformaUuid")}
+    pl_gr = {g["platformaId"] for g in (platforma or {}).get("guruhlar", [])}
+    gmap = {g["id"]: g for g in guruhlar}
+
+    def tolov(o):
+        x = pl_oq.get(o.get("platformaUuid"))
+        return (x or o).get("tolovTugash")
+
+    def guruhda(o):
+        g = gmap.get(o.get("guruhId"), {})
+        if platforma and o.get("platformaUuid") and g.get("platformaId") in pl_gr:
+            return o["platformaUuid"] in pl_oq
+        return True
+
+    jdars = {}
+    for j in jurnal:
+        jdars.setdefault(j["darsId"], {}).setdefault(j["oquvchiId"], []).append(j)
+
+    def dars_ballari(d):
+        return {oid: vaznli_ball(js) for oid, js in jdars.get(d["id"], {}).items()}
+
+    qismlar, jami_dars, jami_bor, jami_n, jami_b, jami_ob, qolgan = [], 0, 0, 0, [], [], []
+    for g in guruhlar:
+        oq = sorted([o for o in oquvchilar if o.get("guruhId") == g["id"]], key=lambda o: o.get("ism", ""))
+        if not oq:
+            continue
+        oid = {o["id"]: o for o in oq}
+        gd = sorted([d for d in darslar if d.get("guruhId") == g["id"]], key=lambda d: (d["sana"], d.get("boshlanish") or 0))
+        hafta = [d for d in gd if dan <= d["sana"] <= gacha]
+        otgan = [d for d in gd if odan <= d["sana"] <= ogacha]
+        q = [f"<b>{_e(g.get('nom'))}</b> — " + (f"{len(hafta)} dars ({', '.join(_kun(d['sana']) for d in hafta)})" if hafta else "bu hafta dars bo'lmagan")]
+
+        if hafta:
+            bor = n = nb = sababli = 0
+            for d in hafta:
+                for x in [x for x in d.get("tartib", []) if x in oid]:
+                    h = davomat_ol(d, x)["holat"]
+                    n += 1
+                    bor += h == "bor"
+                    nb += h == "sababsiz"
+                    sababli += h == "sababli"
+            jami_dars += len(hafta)
+            jami_bor += bor
+            jami_n += n
+            if n:
+                kelmadi = ", ".join(x for x in [f"NB {nb} ta" if nb else "", f"sababli {sababli} ta" if sababli else ""] if x)
+                q.append(f"• Kelish: <b>{round(bor * 100 / n)}%</b>" + (f" · {kelmadi}" if kelmadi else ""))
+
+            def oquvchi_ortacha(ds):
+                m = {}
+                for d in ds:
+                    for k, b in dars_ballari(d).items():
+                        if k in oid and b is not None:
+                            m.setdefault(k, []).append(b)
+                return {k: _ortacha(v) for k, v in m.items()}
+
+            hb, ob = oquvchi_ortacha(hafta), oquvchi_ortacha(otgan)
+            ballar = [b for d in hafta for k, b in dars_ballari(d).items() if k in oid and b is not None]
+            oballar = [b for d in otgan for k, b in dars_ballari(d).items() if k in oid and b is not None]
+            jami_b += ballar
+            jami_ob += oballar
+            ort, oort = _ortacha(ballar), _ortacha(oballar)
+            if ort is not None:
+                fq = _farq(ort, oort).strip(" ()")
+                q.append(f"• O'rtacha ball: <b>{ort}</b>" + (f" (o'tgan hafta {oort}" + (f", {fq}" if fq else "") + ")" if oort is not None else ""))
+                top = sorted(hb.items(), key=lambda x: -x[1])[:3]
+                q.append("• 🏆 Eng yaxshi: " + ", ".join(f"{_e(oid[k]['ism'])} {b}" for k, b in top))
+                osdi = sorted([(k, hb[k] - ob[k]) for k in hb if k in ob and hb[k] - ob[k] >= 10], key=lambda x: -x[1])
+                if osdi:
+                    q.append("• 📈 O'sdi: " + _ismlar(f"{_e(oid[k]['ism'])} +{f}" for k, f in osdi))
+                tushdi = sorted([(k, ob[k] - hb[k]) for k in hb if k in ob and ob[k] - hb[k] >= 15], key=lambda x: -x[1])
+                if tushdi:
+                    q.append("• 📉 Pasaydi: " + _ismlar(f"{_e(oid[k]['ism'])} −{f}" for k, f in tushdi))
+                past = sorted([(k, b) for k, b in hb.items() if b < 50], key=lambda x: x[1])
+                if past:
+                    q.append("• 🆘 Yordam kerak (50 dan past): " + _ismlar(f"{_e(oid[k]['ism'])} {b}" for k, b in past))
+
+            # Konspekt: darsda bo'lib, topshirmaganlar (konspekt baholangan darslarda).
+            yoq = {}
+            for d in hafta:
+                for k, kb in (d.get("konspekt") or {}).items():
+                    if k in oid and (kb.get("yoq") or not kb.get("ball")) and davomat_ol(d, k)["holat"] == "bor":
+                        yoq[k] = yoq.get(k, 0) + 1
+            if yoq:
+                q.append("• 📝 Konspekt topshirmagan: " + _ismlar(f"{_e(oid[k]['ism'])}" + (f" ({n} marta)" if n > 1 else "") for k, n in sorted(yoq.items(), key=lambda x: -x[1])))
+
+        # Ketma-ket 2+ darsga sababsiz kelmaganlar (eng oxirgi darsdan orqaga).
+        ketma = []
+        for o in oq:
+            n = 0
+            for d in reversed(gd):
+                if o["id"] not in d.get("tartib", []):
+                    continue
+                if davomat_ol(d, o["id"])["holat"] != "sababsiz":
+                    break
+                n += 1
+            if n >= 2:
+                ketma.append((o, n))
+        if ketma:
+            q.append("• 🚫 Ketma-ket NB: " + _ismlar(f"{_e(o['ism'])} ({n})" for o, n in sorted(ketma, key=lambda x: -x[1])))
+
+        hol = [h for h in baza.get("holatlar", []) if h.get("oquvchiId") in oid]
+        qizil = [h for h in hol if h.get("status") == "qizil" and dan <= (h.get("qizilSana") or "")[:10] <= gacha]
+        yashil = [h for h in hol if h.get("status") == "yashil" and dan <= (h.get("yashilSana") or "")[:10] <= gacha]
+        if qizil or yashil:
+            q.append("• " + " · ".join(x for x in [
+                f"🟢 Yashilga o'tgan mavzu: {len(yashil)}" if yashil else "",
+                f"🔴 Yangi qizil: {len({h['mavzuId'] for h in qizil})} mavzu, {len({h['oquvchiId'] for h in qizil})} o'quvchi" if qizil else "",
+            ] if x))
+
+        for d in [d for d in gd if d["sana"] >= dan and d["sana"] <= gacha]:
+            ish = []
+            if d.get("holat") == "jarayonda":
+                ish.append("yakunlanmagan")
+            else:
+                if not d.get("konspekt"):
+                    ish.append("konspekt baholanmagan")
+                if g.get("telegramChat") and d["id"] in jdars and not d.get("shaxsiyYuborildi") and not d.get("shaxsiyNavbat"):
+                    ish.append("natija o'quvchilarga yuborilmagan")
+                if g.get("platformaId") and not d.get("platforma"):
+                    ish.append("platformaga yozilmagan")
+            if ish:
+                qolgan.append(f"• {_e(g.get('nom'))} · {_kun(d['sana'])} — {', '.join(ish)}")
+        qismlar.append("\n".join(q))
+
+    bosh = [f"📊 <b>Haftalik hisobot</b> · {_oraliq(dan, gacha)}", "<i>Faqat sizga — o'quvchilarga yuborilmaydi.</i>"]
+    if jami_dars:
+        u = _ortacha(jami_b)
+        bosh.append(f"\nJami: <b>{jami_dars}</b> dars" + (f" · kelish <b>{round(jami_bor * 100 / jami_n)}%</b>" if jami_n else "") + (f" · o'rtacha ball <b>{u}</b>{_farq(u, _ortacha(jami_ob))}" if u is not None else ""))
+    else:
+        bosh.append("\nBu hafta yakunlangan dars yo'q.")
+    bloklar = ["\n".join(bosh)] + qismlar
+    if qolgan:
+        bloklar.append("⏳ <b>Qolib ketgan ishlar</b>\n" + "\n".join(qolgan))
+
+    # To'lov — faqat kuratorga.
+    keyin7 = (bugun + timedelta(days=7)).isoformat()
+    gnom = {g["id"]: g.get("nom", "") for g in guruhlar}
+    tugagan = sorted([o for o in oquvchilar if tolov(o) and tolov(o) < bugun_s and guruhda(o)], key=lambda o: tolov(o))
+    yaqin = sorted([o for o in oquvchilar if tolov(o) and bugun_s <= tolov(o) <= keyin7 and guruhda(o)], key=lambda o: tolov(o))
+    if tugagan or yaqin:
+        t = ["💳 <b>To'lov</b> (faqat siz uchun)"]
+        if tugagan:
+            t.append(f"• Guruhda turibdi, to'lovi tugagan — {len(tugagan)}: " + _ismlar((f"{_e(o['ism'])} ({_e(gnom.get(o['guruhId']))}, {_kun(tolov(o))})" for o in tugagan), 8))
+        if yaqin:
+            t.append(f"• 7 kun ichida tugaydi — {len(yaqin)}: " + _ismlar((f"{_e(o['ism'])} ({_kun(tolov(o))})" for o in yaqin), 8))
+        bloklar.append("\n".join(t))
+
+    k = (platforma or {}).get("komissiya") or soz.get("komissiya")
+    if k and k.get("yozuvlar") is not None:
+        b = k.get("balans", {})
+        faol = [y for y in k["yozuvlar"] if not str(y.get("holat", "")).startswith("Qaytar")]
+        kutish = [y for y in faol if y.get("holat") == "Sovutilmoqda"]
+        sof = b.get("tekshirildi", 0) - b.get("yechildi", 0) - b.get("kutilayotgan", 0) + sum(y["summa"] for y in kutish if y["mavjud"] <= bugun_s)
+        hafta_ichida = [y for y in kutish if bugun_s < y["mavjud"] <= keyin7]
+        oy = [y for y in faol if y.get("bosh", "")[:7] == bugun_s[:7]]
+        t = ["💰 <b>Komissiya</b>", f"• Hozir olish mumkin: <b>{_somm(max(0, sof))}</b>" + (f" (avans qarzi {_somm(-sof)})" if sof < 0 else "")]
+        if hafta_ichida:
+            t.append(f"• 7 kun ichida soviydi: {_somm(sum(y['summa'] for y in hafta_ichida))} ({len(hafta_ichida)} to'lov)")
+        t.append(f"• {OYLAR[bugun.month - 1].capitalize()} oyi uchun hisoblangan: {_somm(sum(y['summa'] for y in oy))} ({len(oy)} to'lov)")
+        if k.get("yangilangan"):
+            t.append(f"<i>Platforma: {_e(k['yangilangan'].replace('T', ' '))}</i>")
+        bloklar.append("\n".join(t))
+
+    # Telegram xabari 4096 belgigacha: bloklar bo'yicha bo'linadi.
+    xabarlar, joriy = [], ""
+    for b in bloklar:
+        if joriy and len(joriy) + len(b) + 2 > 3800:
+            xabarlar.append(joriy)
+            joriy = ""
+        joriy = f"{joriy}\n\n{b}" if joriy else b
+    if joriy:
+        xabarlar.append(joriy)
+    return xabarlar
+
+
 C = sozlamalar()
 PLATFORMA = Platforma(C["platforma"]["tel"], C["platforma"]["parol"]) if C.get("platforma") else None
+BULUT = None  # bulut rejimida — Bulut (main ichida)
+HOLAT_P = {"vaqt": 0.0, "xato": "", "malumot": None}  # platformadan oxirgi muvaffaqiyatli olish (va o'zi — hisobot uchun)
 client = TelegramClient(C["sessiya"], C["api_id"], C["api_hash"])
+
+
+async def haftalik_hisobot(yubor):
+    """Bulutdagi ma'lumotdan haftalik hisobot; yubor=True bo'lsa — FAQAT o'zimizga ('me', Saqlangan xabarlar)."""
+    if not BULUT:
+        raise ValueError("Haftalik hisobot uchun yordamchi bulutga ulangan bo'lishi kerak (python3 spektr_telegram.py --bulut)")
+    baza = await asyncio.to_thread(BULUT.yozuvlar)
+    platforma = HOLAT_P["malumot"]
+    if platforma is None and PLATFORMA:
+        try:
+            platforma = HOLAT_P["malumot"] = await asyncio.to_thread(PLATFORMA.toplam)
+        except Exception as e:  # noqa: BLE001
+            print("Hisobot: platformadan olib bo'lmadi —", e)
+    xabarlar = hisobot_yig(baza, datetime.now(TOSHKENT).date(), platforma)
+    if yubor:
+        for x in xabarlar:
+            await bitta_yubor("me", x)
+            await asyncio.sleep(1)
+    soz = next(iter(baza.get("sozlamalar", [])), {})
+    return {"ok": True, "xabarlar": xabarlar, "yuborildi": bool(yubor), "yoqilgan": soz.get("haftalikHisobot") is not False}
 
 
 def guruhmi(d):
@@ -429,7 +882,20 @@ async def marshrut(usul, yol, sarlavha, tana):
     q = parse_qs(u.query)
     if usul == "GET" and u.path == "/holat":
         men = await client.get_me()
-        return 200, {"ok": True, "men": " ".join(x for x in [men.first_name, men.last_name] if x) or men.username or "", "platforma": bool(PLATFORMA)}
+        return 200, {"ok": True, "men": " ".join(x for x in [men.first_name, men.last_name] if x) or men.username or "", "platforma": bool(PLATFORMA), "versiya": VERSIYA}
+    if usul == "POST" and u.path == "/platforma/yangila":
+        if not PLATFORMA:
+            return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
+        malumot = await asyncio.to_thread(PLATFORMA.toplam)
+        HOLAT_P["malumot"] = malumot
+        if BULUT:
+            await asyncio.to_thread(BULUT.platforma_yoz, malumot)
+            HOLAT_P["vaqt"] = time.time()
+        return 200, {"ok": True, "json": json.dumps(malumot, ensure_ascii=False), "guruh": len(malumot["guruhlar"]), "oquvchi": len(malumot["oquvchilar"])}
+    if usul == "POST" and u.path == "/hisobot":
+        # Ko'rish yoki o'zimizga yuborish. Chat tanlanmaydi: hisobot faqat Saqlangan xabarlarga boradi.
+        d = json.loads(tana or b"{}")
+        return 200, await haftalik_hisobot(bool(d.get("yubor")))
     if usul == "POST" and u.path == "/platforma":
         if not PLATFORMA:
             return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
@@ -443,7 +909,8 @@ async def marshrut(usul, yol, sarlavha, tana):
         async for a in client.iter_participants(ent):
             if a.bot or a.deleted:
                 continue
-            azolar.append({"id": str(a.id), "username": a.username or None, "ism": " ".join(x for x in [a.first_name, a.last_name] if x)})
+            # Telefon — faqat Telegram ko'rsatsa (kontaktda yoki maxfiylik ruxsat bersa): o'quvchini aniq topish uchun.
+            azolar.append({"id": str(a.id), "username": a.username or None, "ism": " ".join(x for x in [a.first_name, a.last_name] if x), "tel": a.phone or None})
         return 200, {"ok": True, "azolar": azolar}
     if usul == "POST" and u.path == "/yubor":
         d = json.loads(tana or b"{}")
@@ -587,13 +1054,44 @@ async def ishla(reader, writer):
 
 
 async def bulut_tsikli(men):
-    b = Bulut(C["bulut"])
-    keyingi_belgi = 0
+    global BULUT
+    b = BULUT = Bulut(C["bulut"])
+    keyingi_belgi, keyingi_platforma, keyingi_hisobot = 0, time.time() + 60, time.time() + 90
     while True:
         try:
+            if time.time() >= keyingi_hisobot:
+                keyingi_hisobot = time.time() + 600
+                kalit = hisobot_vaqtimi(datetime.now(TOSHKENT), C.get("hisobotHafta"))
+                if kalit:
+                    try:
+                        r = await haftalik_hisobot(False)
+                        if r["yoqilgan"]:
+                            for x in r["xabarlar"]:
+                                await bitta_yubor("me", x)
+                                await asyncio.sleep(1)
+                            print("Haftalik hisobot Saqlangan xabarlarga yuborildi.")
+                        C["hisobotHafta"] = kalit
+                        SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+                    except Exception as e:  # noqa: BLE001
+                        print("Haftalik hisobot yuborilmadi:", e)
+                        keyingi_hisobot = time.time() + 1800
+
             if time.time() >= keyingi_belgi:
-                await asyncio.to_thread(b.belgi, men)
+                await asyncio.to_thread(b.belgi, men, platforma=bool(PLATFORMA), platformaVaqt=int(HOLAT_P["vaqt"] * 1000), platformaXato=HOLAT_P["xato"])
                 keyingi_belgi = time.time() + BELGI_ORALIGI
+            if PLATFORMA and time.time() >= keyingi_platforma:
+                # Platformadan yangi ma'lumot (o'quvchilar, to'lov sanalari, komissiya) — sayt o'zi qo'llaydi.
+                try:
+                    malumot = await asyncio.to_thread(PLATFORMA.toplam)
+                    await asyncio.to_thread(b.platforma_yoz, malumot)
+                    HOLAT_P.update(vaqt=time.time(), xato="", malumot=malumot)
+                    keyingi_platforma = time.time() + PLATFORMA_ORALIGI
+                    print(f"Platformadan yangilandi: {len(malumot['guruhlar'])} guruh, {len(malumot['oquvchilar'])} o'quvchi")
+                except Exception as e:  # noqa: BLE001
+                    HOLAT_P["xato"] = str(e)[:200]
+                    keyingi_platforma = time.time() + 1800
+                    print("Platformadan yangilab bo'lmadi:", e)
+                keyingi_belgi = 0
             for ish in await asyncio.to_thread(b.navbat):
                 if not await asyncio.to_thread(b.ol, ish):
                     continue
