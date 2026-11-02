@@ -32,7 +32,8 @@ kelish, o'rtacha ball, ketma-ket NB, qolib ketgan ishlar, to'lovi tugaganlar va 
 
 Kuratorlar nazorati: boshliq akkaunti bilan ulangan bo'lsa — har kuni 00:30 da (kompyuter o'chiq bo'lsa — yoqilganda,
 18:00 gacha) kechagi kun hisoboti (kim qachon boshladi, savol-javob daqiqasi, davomat, reyting) saytda tanlangan
-KM kuratorlar guruhiga yuboriladi. To'lov va komissiya bu hisobotga kirmaydi.
+KM kuratorlar guruhiga yuboriladi; oyning 1-kuni — o'tgan oy uchun har kurator bo'yicha oylik hisobot ham.
+To'lov va komissiya bu hisobotga kirmaydi.
 
 Xavfsizlik: dastur faqat shu kompyuterdan (127.0.0.1) so'rov qabul qiladi, kalitsiz so'rovni rad etadi.
 Guruh/kanallarga yozadi; shaxsiy xabarni esa FAQAT tanlangan guruhning a'zolariga (o'quvchilarga) yuboradi —
@@ -68,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.10.30"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.10.31"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -285,9 +286,9 @@ class Bulut:
         f = r.get("fields", {})
         return {k: (v.get("stringValue") if "stringValue" in v else v.get("booleanValue")) for k, v in f.items()}
 
-    def nazorat_belgi(self, sana):
-        """Kunlik hisobot yuborildi — boshqa yordamchi takror yubormaydi."""
-        self._yoz(f"{self.hujjatlar}/nazoratSozlama/asosiy", {"oxirgiSana": sana})
+    def nazorat_belgi(self, qiymat, maydon="oxirgiSana"):
+        """Hisobot yuborildi (oxirgiSana — kunlik, oxirgiOy — oylik): boshqa yordamchi takror yubormaydi."""
+        self._yoz(f"{self.hujjatlar}/nazoratSozlama/asosiy", {maydon: qiymat})
 
     def nazorat(self, dan, gacha):
         """Hamma kuratorlar: [{uid, p: profil, darslar: [xulosa]}] — darslar [dan, gacha] sanalari bo'yicha."""
@@ -861,6 +862,7 @@ NAZORAT_OXIRGI = 18
 KECH_CHEGARA = 10  # daqiqa
 SJ_KAM, SJ_MAQSAD = 0.5, 0.75  # dars vaqtining ulushi: «qisqa» va reytingda to'liq ball
 KUTISH_MS = 30 * 60_000
+NAZORAT_BOSHI = "2026-10-28"  # bundan oldingi (Spektr ishlatilmagan) kunlar «qayd etilmagan» deb sanalmaydi
 TASHLANGAN_MS = 3 * 3600_000
 KUN_BOSHLARI = [("chor", 3), ("shan", 6), ("yak", 0), ("pay", 4), ("du", 1), ("se", 2), ("ju", 5)]
 HAFTA_KUNLARI = ["yakshanba", "dushanba", "seshanba", "chorshanba", "payshanba", "juma", "shanba"]
@@ -951,7 +953,8 @@ def kun_jadvali(kuratorlar, sana, hozir):
             for d in ds:
                 ishlatildi.add(d["id"])
                 qosh({"uid": k["uid"], "kurator": p.get("ism", ""), "guruh": g.get("nom", ""), "reja": d.get("reja"), "dars": d, "holat": holat(d)})
-            if not ds and jv and rejadami(g, sana):
+            boshi = g["boshlangan"] if g.get("boshlangan") and g["boshlangan"] < NAZORAT_BOSHI else NAZORAT_BOSHI
+            if not ds and jv and rejadami(g, sana) and sana >= boshi:
                 qosh({"uid": k["uid"], "kurator": p.get("ism", ""), "guruh": g.get("nom", ""), "reja": _soat(jv[0]), "dars": None, "holat": "kutilmoqda" if hozir < toshkent_ms(sana, jv[0]) + KUTISH_MS else "yoq"})
         for d in kunda:
             if d["id"] not in ishlatildi:
@@ -1079,6 +1082,62 @@ def nazorat_yig(kuratorlar, sana, hozir):
     return _bolakla(bloklar)
 
 
+def _oy_oraligi(oy):
+    y, m = int(oy[:4]), int(oy[5:7])
+    keyingi = datetime(y + (m == 12), m % 12 + 1, 1).date()
+    return f"{oy}-01", (keyingi - timedelta(days=1)).isoformat()
+
+
+def _oy_qosh(oy, n):
+    y, m = int(oy[:4]), int(oy[5:7]) - 1 + n
+    return f"{y + m // 12:04d}-{m % 12 + 1:02d}"
+
+
+def nazorat_oylik_yig(kuratorlar, oy, hozir):
+    """Oylik hisobot (har kurator): intizom bali o'tgan oy bilan, darslar, o'z vaqtida, savol-javob, kelish, qayd etilmaganlar.
+    kuratorlar — nazorat(o'tgan oy boshi, shu oy oxiri)."""
+    dan, gacha = _oy_oraligi(oy)
+    gacha = min(gacha, datetime.fromtimestamp(hozir / 1000, TOSHKENT).date().isoformat())
+    o_dan, o_gacha = _oy_oraligi(_oy_qosh(oy, -1))
+    oldingi = {x["ism"]: x for x in kurator_reytingi(kuratorlar, o_dan, o_gacha, hozir)}
+    joriy = kurator_reytingi(kuratorlar, dan, gacha, hozir)
+    bloklar = [f"📅 <b>Oylik hisobot · {OYLAR[int(oy[5:7]) - 1].capitalize()} {oy[:4]}</b>\n<i>Kuratorlar intizomi — o'tgan oy bilan solishtirib.</i>"]
+    for i, x in enumerate(joriy, 1):
+        k = next(k for k in kuratorlar if k["p"].get("ism", "") == x["ism"])
+        o = oldingi.get(x["ism"], {})
+        farq = ""
+        if x["ball"] is not None and o.get("ball") is not None and x["ball"] != o["ball"]:
+            farq = f" ({'▲' if x['ball'] > o['ball'] else '▼'}{abs(x['ball'] - o['ball'])})"
+        qatorlar, s = [], date_iso(dan)
+        while s.isoformat() <= gacha:
+            qatorlar += [{**q, "sana": s.isoformat()} for q in kun_jadvali([k], s.isoformat(), hozir)]
+            s += timedelta(days=1)
+        otdi = [q["dars"] for q in qatorlar if q["holat"] == "otdi"]
+        sj = sum(d.get("sj", 0) for d in otdi)
+        t = [f"{i}. <b>{_e(x['ism'])}</b> — intizom <b>{x['ball'] if x['ball'] is not None else '—'}</b>{farq}"]
+        qism = [f"darslar {x['bajarildi']}/{x['rejada']}"]
+        if x["ozVaqtida"] is not None:
+            qism.append(f"o'z vaqtida {x['ozVaqtida']}%")
+        if otdi:
+            qism.append(f"savol-javob {sj // 60} soat {sj % 60} daq (o'rt. {x['sj']} daq)")
+        if x["davomat"] is not None:
+            qism.append(f"kelish {x['davomat']}%")
+        if x["yuborildi"] is not None:
+            qism.append(f"natija yuborildi {x['yuborildi']}%")
+        t.append("    " + " · ".join(qism))
+        yoq = [q for q in qatorlar if q["holat"] == "yoq"]
+        if yoq:
+            t.append(f"    ❌ qayd etilmagan ({len(yoq)}): " + _ismlar((f"{_kun(q['sana'])} {_e(q['guruh'])}" for q in yoq), 8))
+        kech = [q for q in qatorlar if ((q["dars"] or {}).get("kech") or 0) > KECH_CHEGARA]
+        if kech:
+            t.append(f"    ⏰ kech boshlangan: {len(kech)} ta dars")
+        bloklar.append("\n".join(t))
+    if len(bloklar) == 1:
+        bloklar.append("Bu oyda kurator ma'lumoti yo'q.")
+    bloklar[-1] += "\n\n<i>Spektr · batafsil: kurator sayti → Kuratorlar nazorati → Oy.</i>"
+    return _bolakla(bloklar)
+
+
 def nazorat_vaqtimi(hozir):
     """Kunlik hisobot vaqti: 00:30 dan 18:00 gacha — kechagi sana (Toshkent), aks holda None."""
     if (hozir.hour, hozir.minute) >= NAZORAT_SOAT and hozir.hour < NAZORAT_OXIRGI:
@@ -1121,16 +1180,22 @@ async def haftalik_hisobot(yubor):
     return {"ok": True, "xabarlar": xabarlar, "yuborildi": bool(yubor), "yoqilgan": soz.get("haftalikHisobot") is not False}
 
 
-async def nazorat_hisobot(sana, yubor, avto=False):
-    """Kunlik nazorat hisoboti (boshliq akkaunti). avto — vaqti kelganda: o'chirilgan yoki allaqachon yuborilgan bo'lsa jim o'tadi."""
+async def nazorat_hisobot(sana, yubor, avto=False, oy=None):
+    """Kunlik (yoki `oy` berilsa — oylik) nazorat hisoboti (boshliq akkaunti).
+    avto — vaqti kelganda: o'chirilgan yoki allaqachon yuborilgan bo'lsa jim o'tadi."""
     if not BULUT:
         raise ValueError("Nazorat hisoboti uchun yordamchi bulutga ulangan bo'lishi kerak (python3 spektr_telegram.py --bulut)")
     soz = await asyncio.to_thread(BULUT.nazorat_sozlama)
-    if avto and (not soz.get("chat") or soz.get("yoqilgan") is False or (soz.get("oxirgiSana") or "") >= sana):
+    belgi = "oxirgiOy" if oy else "oxirgiSana"
+    if avto and (not soz.get("chat") or soz.get("yoqilgan") is False or (soz.get(belgi) or "") >= (oy or sana)):
         return {"ok": True, "xabarlar": [], "yuborildi": False}
-    dan = (date_iso(sana) - timedelta(days=6)).isoformat()
-    kuratorlar = await asyncio.to_thread(BULUT.nazorat, dan, sana)
-    xabarlar = nazorat_yig(kuratorlar, sana, int(time.time() * 1000))
+    hozir = int(time.time() * 1000)
+    if oy:
+        kuratorlar = await asyncio.to_thread(BULUT.nazorat, _oy_oraligi(_oy_qosh(oy, -1))[0], _oy_oraligi(oy)[1])
+        xabarlar = nazorat_oylik_yig(kuratorlar, oy, hozir)
+    else:
+        kuratorlar = await asyncio.to_thread(BULUT.nazorat, (date_iso(sana) - timedelta(days=6)).isoformat(), sana)
+        xabarlar = nazorat_yig(kuratorlar, sana, hozir)
     if yubor:
         if not soz.get("chat"):
             raise ValueError("KM kuratorlar guruhi tanlanmagan: saytda Kuratorlar nazorati → Hisobot → «Telegramdan tanlash».")
@@ -1138,7 +1203,7 @@ async def nazorat_hisobot(sana, yubor, avto=False):
         for x in xabarlar:
             await bitta_yubor(ent, x)
             await asyncio.sleep(1)
-        await asyncio.to_thread(BULUT.nazorat_belgi, sana)
+        await asyncio.to_thread(BULUT.nazorat_belgi, oy or sana, belgi)
     return {"ok": True, "xabarlar": xabarlar, "yuborildi": bool(yubor)}
 
 
@@ -1221,8 +1286,9 @@ async def marshrut(usul, yol, sarlavha, tana):
         # Kuratorlar nazorati: ko'rish yoki KM kuratorlar guruhiga (boshliq sozlamasidagi chat) yuborish.
         d = json.loads(tana or b"{}")
         sana = str(d.get("sana") or (datetime.now(TOSHKENT).date() - timedelta(days=1)).isoformat())[:10]
+        oy = str(d["oy"])[:7] if d.get("oy") else None
         try:
-            return 200, await nazorat_hisobot(sana, bool(d.get("yubor")))
+            return 200, await nazorat_hisobot(sana, bool(d.get("yubor")), oy=oy)
         except PermissionError:
             return 403, {"ok": False, "xato": "Bu kurator akkaunti boshliq emas: nazorat hisoboti faqat boshliq akkauntida."}
     if usul == "POST" and u.path == "/platforma":
@@ -1443,6 +1509,13 @@ async def bulut_tsikli(men):
                         r = await nazorat_hisobot(sana, True, avto=True)
                         if r["xabarlar"]:
                             print(f"Kuratorlar nazorati ({sana}) KM kuratorlar guruhiga yuborildi.")
+                        # Oyning 1-kuni — o'tgan oy uchun oylik hisobot ham.
+                        oy = sana[:7]
+                        if (date_iso(sana) + timedelta(days=1)).day == 1 and C.get("nazoratOy") != oy:
+                            r = await nazorat_hisobot(sana, True, avto=True, oy=oy)
+                            if r["xabarlar"]:
+                                print(f"Oylik hisobot ({oy}) KM kuratorlar guruhiga yuborildi.")
+                            C["nazoratOy"] = oy
                         C["nazoratSana"] = sana
                     except PermissionError:
                         C["nazoratSana"] = sana  # boshliq emas — bugun qayta urinilmaydi
