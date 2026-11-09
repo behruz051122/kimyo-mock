@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.10.31"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.09"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -446,6 +446,42 @@ def toplam_yig(guruhlar, oquvchilar, kurator, sahifalar, bugun=None):
     }
 
 
+def kurs_darslari(modullar):
+    """Platforma kursidagi darslar: modul «PK-1 | …» / «PK-2 | …», dars «12-dars | 23,24-mavzu» → [{id, n, mav, kitob, nom}]."""
+    out = []
+    for m in modullar or []:
+        mt = str(m.get("title") or "")
+        kitob = "pk1" if re.match(r"\s*PK\s*-?\s*1\b", mt, re.I) else "pk2" if re.match(r"\s*PK\s*-?\s*2\b", mt, re.I) else None
+        for l in m.get("lessons") or []:
+            nom = str(l.get("title") or "")
+            n = re.match(r"\s*(\d+)\s*-\s*dars", nom, re.I)
+            mav = [int(x) for x in re.findall(r"\d+", nom.split("|", 1)[1])] if "|" in nom else []
+            if l.get("id"):
+                out.append({"id": l["id"], "n": int(n.group(1)) if n else None, "mav": mav, "kitob": kitob, "nom": nom.strip()})
+    return out
+
+
+def test_darslari(darslar, kitob=None, dars=None, mavzular=()):
+    """O'quvchining bugungi mavzulari (kitob § raqamlari) uchun platformadagi dars(lar). Raqamlar kitobdan-kitobga
+    farq qilishi mumkin (sayt PK-2 rejasi 86, platformaniki 84 dars), shuning uchun asosan § bo'yicha topiladi;
+    bir § ikki darsda bo'lsa (37, 81, 94) — dars raqami mos kelgani olinadi."""
+    hammasi = [x for x in darslar if x["kitob"] == kitob] if kitob and any(x["kitob"] == kitob for x in darslar) else list(darslar)
+    kerak = sorted({int(t) for t in mavzular})
+    if not kerak:
+        return [x for x in hammasi if dars and x["n"] == dars][:1]
+    tanlov, qoplangan = [], set()
+    for t in kerak:
+        if t in qoplangan:
+            continue
+        nomzod = [x for x in hammasi if t in x["mav"]]
+        if not nomzod:
+            continue
+        x = min(nomzod, key=lambda x: (x["n"] != dars, -len(set(x["mav"]) & set(kerak)), x["n"] or 0))
+        tanlov.append(x)
+        qoplangan |= set(x["mav"])
+    return tanlov
+
+
 class Platforma:
     """Kurator akkaunti bilan (sessiya cookie). Baho platformaning o'z sahifasi kabi /api/curator/lesson-grade ga yoziladi."""
 
@@ -489,6 +525,50 @@ class Platforma:
     def guruh(self, gid):
         s = rsc_matn(self.sahifa(f"/curator/groups/{urllib.parse.quote(gid)}"))
         return {"oynalar": json_keyin(s, "initialWindows") or [], "baholar": json_keyin(s, "gradingInitial") or {}, "qotirilgan": json_keyin(s, "frozenDays") or []}
+
+    def test_och(self, d):
+        """Dars boshida testlarni ochish. d = {guruh: platformaId, soat?: 24, oquvchilar: [{k, studentId, kitob?, dars?, mavzular: [§...]}]}.
+        Har o'quvchiga o'z mavzusi testi (imtihon oynasi) ochiladi; ishlab bo'lingan yoki ochiq turgani platformaning o'zi o'tkazib yuboradi."""
+        gid = str(d.get("guruh") or "")
+        if not gid:
+            raise ValueError("guruh ko'rsatilmagan")
+        soat = max(1, min(72, int(d.get("soat") or 24)))
+        s = rsc_matn(self.sahifa(f"/curator/groups/{urllib.parse.quote(gid)}"))
+        darslar = kurs_darslari(json_keyin(s, "modules") or [])
+        if not darslar:
+            return {"ok": False, "xato": "Platformada guruhning kursi (darslar ro'yxati) topilmadi."}
+        items, natija = [], []
+        for o in d.get("oquvchilar") or []:
+            sid = str(o.get("studentId") or "")
+            if not sid:
+                natija.append({"k": o.get("k"), "holat": "xato", "xato": "platformada topilmagan o'quvchi"})
+                continue
+            ds = test_darslari(darslar, o.get("kitob"), o.get("dars"), o.get("mavzular") or [])
+            if not ds:
+                natija.append({"k": o.get("k"), "holat": "xato", "xato": "platformada mos dars topilmadi"})
+                continue
+            items += [{"studentId": sid, "lessonId": x["id"]} for x in ds]
+            natija.append({"k": o.get("k"), "holat": "ok", "darslar": [x["nom"] for x in ds]})
+        if not items:
+            return {"ok": False, "xato": "Ochiladigan test topilmadi.", "natija": natija}
+        hozir = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        z = lambda t: t.isoformat().replace("+00:00", "Z")
+        tana = {"groupId": gid, "items": items, "openFrom": z(hozir), "openTo": z(hozir + timedelta(hours=soat))}
+        st, txt = 0, ""
+        for _ in range(2):
+            st, url, txt = self._so("POST", "/api/curator/lesson-exam-windows/bulk", tana)
+            if st in (401, 403) or "/login" in url:
+                self.kir()
+                continue
+            break
+        try:
+            j = json.loads(txt or "{}")
+        except ValueError:
+            j = {}
+        if not (200 <= st < 300) or not isinstance(j, dict) or j.get("ok") is False:
+            xato = j.get("error") if isinstance(j, dict) else None
+            return {"ok": False, "xato": xato or f"Platforma testlarni ochmadi ({st}).", "natija": natija}
+        return {"ok": True, "ochildi": int(j.get("created") or 0), "otkazildi": int(j.get("skipped") or 0), "sabablar": j.get("reasons") or {}, "soat": soat, "natija": natija}
 
     def yoz(self, gid, sid, lid, sana, maydon, qiymat):
         tana = {"groupId": gid, "studentId": sid, "courseLessonId": lid, "lessonDate": sana, maydon: qiymat}
@@ -1223,6 +1303,38 @@ async def chat_ol(chat):
     return await client.get_entity(n)
 
 
+async def natija_fayl_yubor(d):
+    """Saytdan kelgan natijalar → PDF (reyting, har o'quvchi beti, tahlil va qarzdorlik) → guruhga bitta fayl. Fayl yasab bo'lmasa — ok=False, faylsiz=True
+    (sayt o'shanda eski usulda matn bilan yuboradi)."""
+    try:
+        import natija_fayl
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "faylsiz": True, "xato": f"natija_fayl.py topilmadi yoki ochilmadi ({e}) — yangi build bilan deploy.sh ni qayta ishga tushiring."}
+    try:
+        import reportlab  # noqa: F401
+    except ImportError:
+        return {"ok": False, "faylsiz": True, "xato": "PDF uchun kutubxona yo'q: terminalda «pip3 install reportlab» ni bir marta bajaring."}
+    ent = await chat_ol(d.get("chat", ""))
+    papka = PAPKA / "natijalar"
+    papka.mkdir(exist_ok=True)
+    nom = natija_fayl.fayl_nomi(d)
+    (papka / nom).with_suffix(".json").write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+    pdf, _ = await asyncio.to_thread(natija_fayl.yasash, d)
+    yol = papka / nom
+    yol.write_bytes(pdf)
+    izoh = f"{d.get('guruh', '')} · {d.get('sana', '')} — savol-javob natijalari.\n1-betda reyting, keyingi betlarda har bir o‘quvchining savollari va tahlili."
+    for _ in range(3):
+        try:
+            await client.send_file(ent, str(yol), caption=izoh, force_document=True)
+            break
+        except errors.FloodWaitError as e:
+            if e.seconds > 300:
+                raise
+            await asyncio.sleep(e.seconds + 1)
+    print(f"  Natija fayli yuborildi: {nom} ({len(pdf) // 1024} KB)")
+    return {"ok": True, "yuborildi": 1, "fayl": nom}
+
+
 async def bitta_yubor(kimga, matn):
     """Bitta xabar: qisqa FloodWait'ni kutib, 3 marta urinadi; uzun kutish (5 daqiqadan ko'p) — xato."""
     for _ in range(3):
@@ -1295,6 +1407,11 @@ async def marshrut(usul, yol, sarlavha, tana):
         if not PLATFORMA:
             return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
         return 200, await asyncio.to_thread(PLATFORMA.baholar, json.loads(tana or b"{}"))
+    if usul == "POST" and u.path == "/platforma/test":
+        # Dars boshida (kurator rozi bo'lsa): har o'quvchiga bugungi mavzusi testini ochish.
+        if not PLATFORMA:
+            return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
+        return 200, await asyncio.to_thread(PLATFORMA.test_och, json.loads(tana or b"{}"))
     if usul == "GET" and u.path == "/chatlar":
         chatlar = [{"id": str(d.id), "nom": d.name} async for d in client.iter_dialogs() if guruhmi(d)]
         return 200, {"ok": True, "chatlar": chatlar}
@@ -1367,6 +1484,10 @@ async def marshrut(usul, yol, sarlavha, tana):
             print(f"  yuborildi {n}/{len(xabarlar)}")
             await asyncio.sleep(1.2)
         return 200, {"ok": True, "yuborildi": n}
+    if usul == "POST" and u.path == "/natija-fayl":
+        # Guruhga bitta PDF: 1-bet reyting, keyin har o'quvchining beti, tahlil va qarzdorlik (natija_fayl.py).
+        d = json.loads(tana or b"{}")
+        return 200, await natija_fayl_yubor(d)
     if usul == "POST" and u.path == "/shaxsiy":
         # Har o'quvchiga shaxsan — faqat shu guruhning a'zolariga (ID yoki username bo'yicha topiladi).
         d = json.loads(tana or b"{}")
