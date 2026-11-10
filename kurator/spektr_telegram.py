@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.09"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.10"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -451,7 +451,9 @@ def kurs_darslari(modullar):
     out = []
     for m in modullar or []:
         mt = str(m.get("title") or "")
-        kitob = "pk1" if re.match(r"\s*PK\s*-?\s*1\b", mt, re.I) else "pk2" if re.match(r"\s*PK\s*-?\s*2\b", mt, re.I) else None
+        # «PK-2 | …», «PK2», «Premium kimyo-2», «Kimyo 1» — hammasi taniladi.
+        km = re.search(r"(?:\bPK|kimyo)\s*-?\s*([12])\b", mt, re.I)
+        kitob = f"pk{km.group(1)}" if km else None
         for l in m.get("lessons") or []:
             nom = str(l.get("title") or "")
             n = re.match(r"\s*(\d+)\s*-\s*dars", nom, re.I)
@@ -465,8 +467,10 @@ def test_darslari(darslar, kitob=None, dars=None, mavzular=()):
     """O'quvchining bugungi mavzulari (kitob § raqamlari) uchun platformadagi dars(lar). Raqamlar kitobdan-kitobga
     farq qilishi mumkin (sayt PK-2 rejasi 86, platformaniki 84 dars), shuning uchun asosan § bo'yicha topiladi;
     bir § ikki darsda bo'lsa (37, 81, 94) — dars raqami mos kelgani olinadi."""
-    hammasi = [x for x in darslar if x["kitob"] == kitob] if kitob and any(x["kitob"] == kitob for x in darslar) else list(darslar)
+    shu = [x for x in darslar if x["kitob"] == kitob] if kitob else []
     kerak = sorted({int(t) for t in mavzular})
+    # Kitob bo'yicha ajratilgan ro'yxatda mavzu topilmasa (modul nomi boshqacha bo'lishi mumkin) — butun kursdan qidiriladi.
+    hammasi = shu if shu and (not kerak or any(t in x["mav"] for x in shu for t in kerak)) else list(darslar)
     if not kerak:
         return [x for x in hammasi if dars and x["n"] == dars][:1]
     tanlov, qoplangan = [], set()
