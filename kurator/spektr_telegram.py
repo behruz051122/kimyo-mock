@@ -1303,11 +1303,33 @@ async def chat_ol(chat):
     return await client.get_entity(n)
 
 
+NATIJA_FAYL_URL = "https://behruz051122.github.io/kimyo-mock/kurator/natija_fayl.py"
+
+
+def natija_fayl_modul():
+    """natija_fayl.py shu dastur yonida bo'lmasa — kurator saytidan bir marta yuklab olinadi (deploy.sh boshqa papkaga qo'ygan bo'lishi mumkin)."""
+    if str(PAPKA) not in sys.path:
+        sys.path.insert(0, str(PAPKA))
+    try:
+        import natija_fayl
+        return natija_fayl
+    except ImportError:
+        pass
+    with urllib.request.urlopen(NATIJA_FAYL_URL, timeout=30) as r:
+        kod = r.read()
+    if b"def yasash" not in kod:
+        raise RuntimeError("saytdagi natija_fayl.py noto'g'ri")
+    (PAPKA / "natija_fayl.py").write_bytes(kod)
+    print("  natija_fayl.py saytdan yuklab olindi.")
+    import natija_fayl
+    return natija_fayl
+
+
 async def natija_fayl_yubor(d):
     """Saytdan kelgan natijalar → PDF (reyting, har o'quvchi beti, tahlil va qarzdorlik) → guruhga bitta fayl. Fayl yasab bo'lmasa — ok=False, faylsiz=True
     (sayt o'shanda eski usulda matn bilan yuboradi)."""
     try:
-        import natija_fayl
+        natija_fayl = await asyncio.to_thread(natija_fayl_modul)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "faylsiz": True, "xato": f"natija_fayl.py topilmadi yoki ochilmadi ({e}) — yangi build bilan deploy.sh ni qayta ishga tushiring."}
     try:
