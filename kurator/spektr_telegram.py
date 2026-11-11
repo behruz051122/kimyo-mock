@@ -1469,6 +1469,31 @@ async def marshrut(usul, yol, sarlavha, tana):
                 return {"baholar": json_keyin(s, "gradingInitial") or {}, "darslar": darslar}
             natija[gid] = await asyncio.to_thread(ol)
         return 200, {"ok": True, "guruhlar": natija}
+    if usul == "POST" and u.path == "/konspekt-tg":
+        # Konspekt tekshiruvi: guruh chatiga «dan»dan keyin rasm/fayl (konspekt) tashlaganlar — kim, nechta, qachon.
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("Guruh tanlanishi kerak")
+        dan = datetime.fromtimestamp((d.get("dan") or 0) / 1000, tz=timezone.utc)
+        kim = {}
+        async for m in client.iter_messages(ent, limit=1500):
+            if m.date < dan:
+                break
+            if m.out or not m.sender_id or not (m.photo or m.document):
+                continue
+            k = kim.setdefault(str(m.sender_id), {"id": str(m.sender_id), "soni": 0, "vaqt": 0, "matn": ""})
+            k["soni"] += 1
+            k["vaqt"] = max(k["vaqt"], int(m.date.timestamp() * 1000))
+            if (m.message or "").strip() and not k["matn"]:
+                k["matn"] = m.message.strip()[:120]
+        for k in kim.values():
+            try:
+                e = await client.get_entity(int(k["id"]))
+                k["username"] = getattr(e, "username", None)
+            except Exception:  # noqa: BLE001
+                pass
+        return 200, {"ok": True, "tashladi": list(kim.values())}
     if usul == "POST" and u.path == "/nb-javoblar":
         # Kelmaganlar NB xabariga nima deb javob yozgani: «dan» (ms) dan keyingi kiruvchi shaxsiy xabarlar (o'qiladi, yuborilmaydi).
         d = json.loads(tana or b"{}")
