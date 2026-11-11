@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.10"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.11"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -1438,6 +1438,44 @@ async def marshrut(usul, yol, sarlavha, tana):
         if not PLATFORMA:
             return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
         return 200, await asyncio.to_thread(PLATFORMA.test_och, json.loads(tana or b"{}"))
+    if usul == "POST" and u.path == "/platforma/ballar":
+        # Xolislik indeksi: guruhning platformadagi baholari (og'zaki theoryScore va test examScore) — dars nomlari bilan.
+        if not PLATFORMA:
+            return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan."}
+        d = json.loads(tana or b"{}")
+        natija = {}
+        for gid in [str(x) for x in d.get("guruhlar") or []][:10]:
+            def ol(g=gid):
+                s = rsc_matn(PLATFORMA.sahifa(f"/curator/groups/{urllib.parse.quote(g)}"))
+                darslar = {x["id"]: x["nom"] for x in kurs_darslari(json_keyin(s, "modules") or [])}
+                return {"baholar": json_keyin(s, "gradingInitial") or {}, "darslar": darslar}
+            natija[gid] = await asyncio.to_thread(ol)
+        return 200, {"ok": True, "guruhlar": natija}
+    if usul == "POST" and u.path == "/nb-javoblar":
+        # Kelmaganlar NB xabariga nima deb javob yozgani: «dan» (ms) dan keyingi kiruvchi shaxsiy xabarlar (o'qiladi, yuborilmaydi).
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("Guruh tanlanishi kerak")
+        dan = datetime.fromtimestamp((d.get("dan") or 0) / 1000, tz=timezone.utc)
+        azolar = [a for a in await client.get_participants(ent) if not a.bot and not a.deleted]
+        by_id = {str(a.id): a for a in azolar}
+        by_un = {a.username.lower(): a for a in azolar if a.username}
+        natija = []
+        for q in [x for x in d.get("qabul", []) if isinstance(x, dict)][:60]:
+            a = by_id.get(str(q.get("id") or "")) or by_un.get(str(q.get("username") or "").lstrip("@").lower())
+            if not a:
+                natija.append({"k": q.get("k"), "holat": "topilmadi"})
+                continue
+            xabarlar = []
+            async for m in client.iter_messages(a, limit=15):
+                if m.date < dan:
+                    break
+                if not m.out and (m.message or "").strip():
+                    xabarlar.append({"matn": m.message.strip()[:400], "vaqt": int(m.date.timestamp() * 1000)})
+            natija.append({"k": q.get("k"), "holat": "ok", "javoblar": list(reversed(xabarlar))})
+            await asyncio.sleep(0.4)
+        return 200, {"ok": True, "natija": natija}
     if usul == "GET" and u.path == "/chatlar":
         chatlar = [{"id": str(d.id), "nom": d.name} async for d in client.iter_dialogs() if guruhmi(d)]
         return 200, {"ok": True, "chatlar": chatlar}
