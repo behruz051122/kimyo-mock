@@ -1341,6 +1341,24 @@ async def natija_fayl_yubor(d):
     except ImportError:
         return {"ok": False, "faylsiz": True, "xato": "PDF uchun kutubxona yo'q: terminalda «pip3 install reportlab» ni bir marta bajaring."}
     ent = await chat_ol(d.get("chat", ""))
+    # Nazorat testi: platformadagi test oynalari (dars boshidan keyin ochilganlar) — har o'quvchiga natijasi.
+    t = d.get("test") or {}
+    if PLATFORMA and t.get("guruhlar"):
+        try:
+            dan = datetime.fromtimestamp((t.get("dan") or 0) / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            oynalar = []
+            for gid in [str(x) for x in t["guruhlar"]][:6]:
+                oynalar += (await asyncio.to_thread(PLATFORMA.guruh, gid))["oynalar"]
+            by = {}
+            for w in oynalar:
+                if str(w.get("openFrom") or "") >= dan[:19]:
+                    by.setdefault(w.get("studentId"), []).append({"dars": w.get("lessonTitle") or "", "holat": w.get("status") or "", "foiz": w.get("scorePercent")})
+            for o in d.get("oquvchilar") or []:
+                if o.get("uuid"):
+                    o["test"] = by.get(o["uuid"], [])
+            d["testOlindi"] = True
+        except Exception as e:  # noqa: BLE001
+            print("  Nazorat testi olinmadi:", e)
     papka = PAPKA / "natijalar"
     papka.mkdir(exist_ok=True)
     nom = natija_fayl.fayl_nomi(d)

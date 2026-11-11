@@ -220,6 +220,19 @@ def m(s):
     return s.replace("\n", "<br/>")
 
 
+def test_matn(o, qisqa=False):
+    """Nazorat testi: ishlangan bo'lsa — foiz (bir nechta bo'lsa o'rtacha), aks holda «ishlanmagan»."""
+    t = o.get("test")
+    if t is None:
+        return "—"
+    foizlar = [x["foiz"] for x in t if isinstance(x.get("foiz"), (int, float))]
+    if foizlar:
+        f = round(sum(foizlar) / len(foizlar))
+        rang = "#16A34A" if f >= 85 else "#2563EB" if f >= 70 else "#D97706" if f >= 50 else "#DC2626"
+        return f"<font color='{rang}'><b>{f}%</b></font>" if qisqa else f"{f}%" + (f" ({len(foizlar)} ta test)" if len(foizlar) > 1 else "")
+    return ("hali yo‘q" if qisqa else "hali ishlanmagan (test 24 soat ochiq)") if t else "ochilmagan"
+
+
 def pdf_yasa(d, tx):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -407,7 +420,8 @@ def pdf_yasa(d, tx):
                        kpi(str(max(ballar)) if ballar else "—", "Eng yuqori ball", R["yashil"].hexval()), kpi(*k4)]),
                Paragraph(m("Reyting"), BOLIM)]
 
-    sat = [[Paragraph(m(x), KICHIK) for x in ["O‘rin", "O‘quvchi", "Natija", "Ball", "To‘g‘ri · Chala · Yo‘q", "Konspekt"]]]
+    test_bor = bool(d.get("testOlindi"))
+    sat = [[Paragraph(m(x), KICHIK) for x in ["O‘rin", "O‘quvchi", "Natija", "Ball", "To‘g‘ri · Chala · Yo‘q", "Konspekt"] + (["Test"] if test_bor else [])]]
     for orin, o in rey:
         def son(n, o=o):
             return sum(1 for s in o.get("savollar", []) if s.get("natija") == n)
@@ -420,8 +434,10 @@ def pdf_yasa(d, tx):
             Paragraph(f"<font name='{shq}' size='12' color='{rang_ball(b or 0).hexval()}'>{'—' if b is None else b}</font>", ust("bb", l=14)),
             Paragraph(f"<font color='#16A34A'>{son('berdi')}</font>  ·  <font color='#D97706'>{son('chala')}</font>  ·  <font color='#DC2626'>{son('berolmadi')}</font>", MATN),
             Paragraph(m("—" if not kon else "topshirmadi" if kon.get("yoq") else str(kon.get("ball"))), MATN),
-        ])
-    rt = Table(sat, colWidths=[13 * mm, W - 13 * mm - 40 * mm - 16 * mm - 34 * mm - 20 * mm, 40 * mm, 16 * mm, 34 * mm, 20 * mm], repeatRows=1)
+        ] + ([Paragraph(test_matn(o, qisqa=True), MATN if "%" in test_matn(o, qisqa=True) else KICHIK)] if test_bor else []))
+    eni = [13 * mm, 0, 40 * mm, 16 * mm, 34 * mm, 20 * mm] + ([22 * mm] if test_bor else [])
+    eni[1] = W - sum(eni)
+    rt = Table(sat, colWidths=eni, repeatRows=1)
     st = jadval_uslubi()
     for i, (orin, _) in enumerate(rey, 1):
         if orin <= 3:
@@ -463,6 +479,8 @@ def pdf_yasa(d, tx):
             meta.insert(0, o["kurs"])
         if kon:
             meta.append("Konspekt: topshirilmadi" if kon.get("yoq") else f"Konspekt: {kon.get('ball')}/100")
+        if d.get("testOlindi"):
+            meta.append("Nazorat testi: " + test_matn(o))
         hikoya += [Sarlavha(o.get("ism", ""), f"{guruh}  ·  {sana}  ·  {orin}-o‘rin", "  ·  ".join(meta), o.get("ball"), orin, h=30 * mm), Spacer(0, 8)]
 
         def son(n, o=o):
