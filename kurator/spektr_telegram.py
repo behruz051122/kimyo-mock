@@ -1469,6 +1469,42 @@ async def marshrut(usul, yol, sarlavha, tana):
                 return {"baholar": json_keyin(s, "gradingInitial") or {}, "darslar": darslar}
             natija[gid] = await asyncio.to_thread(ol)
         return 200, {"ok": True, "guruhlar": natija}
+    if usul == "POST" and u.path == "/oldindan":
+        # Darsdan oldin ogohlantirganlar: «dan»dan keyin o'quvchi guruh chatiga yoki kuratorga shaxsan yozgan matnlar.
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("Guruh tanlanishi kerak")
+        dan = datetime.fromtimestamp((d.get("dan") or 0) / 1000, tz=timezone.utc)
+        qabul = [x for x in d.get("qabul", []) if isinstance(x, dict)][:80]
+        id_k = {str(x.get("id")): x.get("k") for x in qabul if x.get("id")}
+        un_k = {str(x.get("username")).lstrip("@").lower(): x.get("k") for x in qabul if x.get("username")}
+        natija = {}
+        async for m in client.iter_messages(ent, limit=800):
+            if m.date < dan:
+                break
+            if m.out or not (m.message or "").strip():
+                continue
+            k = id_k.get(str(m.sender_id))
+            if not k and m.sender and getattr(m.sender, "username", None):
+                k = un_k.get(m.sender.username.lower())
+            if k:
+                natija.setdefault(k, []).append({"matn": m.message.strip()[:300], "vaqt": int(m.date.timestamp() * 1000), "joy": "guruh"})
+        for x in qabul:
+            kim = x.get("id") or x.get("username")
+            if not kim:
+                continue
+            try:
+                e = await client.get_entity(int(kim) if str(kim).isdigit() else str(kim))
+                async for m in client.iter_messages(e, limit=15):
+                    if m.date < dan:
+                        break
+                    if not m.out and (m.message or "").strip():
+                        natija.setdefault(x.get("k"), []).append({"matn": m.message.strip()[:300], "vaqt": int(m.date.timestamp() * 1000), "joy": "shaxsiy"})
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(0.3)
+        return 200, {"ok": True, "natija": natija}
     if usul == "POST" and u.path == "/konspekt-tg":
         # Konspekt tekshiruvi: guruh chatiga «dan»dan keyin rasm/fayl (konspekt) tashlaganlar — kim, nechta, qachon.
         d = json.loads(tana or b"{}")
