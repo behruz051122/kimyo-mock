@@ -1725,6 +1725,30 @@ async def marshrut(usul, yol, sarlavha, tana):
             if i < len(qabul) - 1:
                 await asyncio.sleep(random.uniform(*SHAXSIY_PAUZA))
         return 200, {"ok": True, "natija": natija}
+    if usul == "POST" and u.path == "/ochir":
+        # Shu guruh a'zolariga «dan» (ms) dan keyin O'ZIMIZ yozgan shaxsiy xabarlarni ikkala tomondan o'chirish.
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("O'quvchilar guruhi tanlanishi kerak")
+        dan = datetime.fromtimestamp((d.get("dan") or 0) / 1000, tz=timezone.utc)
+        if datetime.now(timezone.utc) - dan > timedelta(hours=48):
+            raise ValueError("Faqat oxirgi 48 soatdagi xabarlar o'chiriladi")
+        azolar = [a for a in await client.get_participants(ent) if not a.bot and not a.deleted]
+        by_id = {str(a.id): a for a in azolar}
+        by_un = {a.username.lower(): a for a in azolar if a.username}
+        natija = []
+        for q in [q for q in d.get("qabul", []) if isinstance(q, dict)][:SHAXSIY_CHEGARA]:
+            a = by_id.get(str(q.get("id") or "")) or by_un.get(str(q.get("username") or "").lstrip("@").lower())
+            if not a:
+                natija.append({"k": q.get("k"), "holat": "topilmadi"})
+                continue
+            ids = [m.id async for m in client.iter_messages(a, limit=50) if m.out and m.date >= dan]
+            if ids:
+                await client.delete_messages(a, ids, revoke=True)
+            natija.append({"k": q.get("k"), "holat": "ok", "ochirildi": len(ids)})
+            await asyncio.sleep(random.uniform(1, 2))
+        return 200, {"ok": True, "natija": natija}
     if usul == "POST" and u.path == "/tahrir":
         # Yuborilgan xabarni tuzatish (masalan, «Bugungi» → «24-oktabrdagi»): faqat shu guruhning a'zolariga
         # O'ZIMIZ yuborgan, oxirgi `soat` (≤72) ichidagi va `eski` matni bor xabarlar. Yangi xabar yuborilmaydi.
