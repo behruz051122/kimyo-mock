@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.15b"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.15c"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2030,10 +2030,12 @@ async def haftalik_test_qarzi():
                     continue
                 items += [{"studentId": o["platformaUuid"], "lessonId": lid} for lid in qarz]
                 if o.get("telegramId") or o.get("username"):
-                    ism = "" if (o.get("ism") or "").startswith("Ismsiz") else o.get("ism", "")
-                    ruy = "\n".join(f"• {t}" for t in list(qarz.values())[:8])
+                    # Odam yozgandek: salomlashish va ismsiz, qisqa (o'quvchi «bot» deb sezmasin).
+                    nomlar = [(t.split("|", 1)[1] if "|" in t else t).strip() for t in list(qarz.values())[:6]]
+                    ruy = nomlar[0] if len(nomlar) == 1 else ", ".join(nomlar[:-1]) + " va " + nomlar[-1]
+                    soni = "testingiz" if len(nomlar) == 1 else f"{len(nomlar)} ta testingiz"
                     qabul.append({"k": o["id"], "id": o.get("telegramId"), "username": o.get("username"), "xabarlar": [
-                        f"Assalomu alaykum{', ' + ism if ism else ''}!\nBu hafta yechilmay qolgan testlaringiz:\n{ruy}\n\nUlarni yana 48 soatga ochib qo‘ydim — {tugash.strftime('%d.%m')} soat {tugash.strftime('%H:%M')} gacha yechib qo‘ying. Test natijasi umumiy bahoga kiradi."]})
+                        f"Bu hafta {soni} yechilmay qoldi ({ruy}). Yana ochib qo‘ydim, {tugash.strftime('%d.%m')} kuni soat {tugash.strftime('%H:%M')} gacha yechib qo‘ying."]})
             if not items:
                 continue
             z = lambda t: t.isoformat().replace("+00:00", "Z")  # noqa: E731
