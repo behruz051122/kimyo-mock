@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.15c"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.15d"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2001,18 +2001,23 @@ def test_qarzlari(oynalar, sid, hozir_ms):
     return qarz
 
 
+def qarz_guruhlari(baza, bugun):
+    """Test qarzi faqat oxirgi 7 kunda Spektr'da dars o'tgan guruhlarga (kurator dars o'tmaydigan guruh — masalan PK3 — tegilmaydi)."""
+    dan = (bugun - timedelta(days=7)).isoformat()
+    faol = {d.get("guruhId") for d in baza.get("darslar", []) if d.get("holat") == "yakunlangan" and (d.get("sana") or "") >= dan}
+    return [g for g in baza.get("guruhlar", []) if g.get("id") in faol and g.get("telegramChat") and g.get("platformaId")]
+
+
 async def haftalik_test_qarzi():
     """Yakshanba: shu hafta yechilmay qolgan testlarni 48 soatga qayta ochib, har o'quvchiga shaxsan ro'yxat."""
-    baza = await asyncio.to_thread(BULUT.yozuvlar, 2)
+    baza = await asyncio.to_thread(BULUT.yozuvlar, 9)
     soz = next(iter(baza.get("sozlamalar", [])), {})
     if soz.get("testQarzi") is False:
         return 0
     hozir = int(time.time() * 1000)
     tugash = datetime.fromtimestamp(hozir / 1000 + 48 * 3600, TOSHKENT)
     jami = 0
-    for g in baza.get("guruhlar", []):
-        if not g.get("telegramChat") or not g.get("platformaId"):
-            continue
+    for g in qarz_guruhlari(baza, datetime.now(TOSHKENT).date()):
         gidlar = {g["platformaId"]: g["telegramChat"], **{k: v.get("chat") for k, v in (g.get("qoshimchaChat") or {}).items() if v.get("chat")}}
         for gid, chat in gidlar.items():
             oq = [o for o in baza.get("oquvchilar", []) if o.get("guruhId") == g["id"] and o.get("faol") and o.get("platformaUuid") and (o.get("platformaGuruh") or g["platformaId"]) == gid]
