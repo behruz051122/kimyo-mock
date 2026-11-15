@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.15d"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.15e"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -343,6 +343,17 @@ class Bulut:
     def tugat(self, ish, status, data):
         self._yoz(ish["nom"], {"holat": "tayyor" if status == 200 else "xato", "status": status, "javob": json.dumps(data, ensure_ascii=False)})
 
+    def yangi_xatlar(self):
+        """O'quvchilar saytidan kelgan (NB olgan darsi uchun sababi), kuratorga hali yuborilmagan xatlar."""
+        so = {"structuredQuery": {"from": [{"collectionId": "oquvchiXat"}], "where": {"fieldFilter": {"field": {"fieldPath": "kurator"}, "op": "EQUAL", "value": {"stringValue": self.uid}}}, "limit": 100}}
+        st, r = http("POST", f"{FS_ILDIZ}/v1/{self.hujjatlar}:runQuery", so, self._token())
+        if st != 200:
+            raise RuntimeError(f"o'quvchi xatlarini o'qib bo'lmadi ({st}): {r}")
+        return xat_qatorlari(r)
+
+    def xat_yuborildi(self, nom):
+        self._yoz(nom, {"xabar": True})
+
 
 # ── Platforma (online.kelajakmediklari.uz): SJ, konspekt, davomat ──
 
@@ -362,6 +373,55 @@ def json_keyin(s, kalit):
 def mahalliy_sana(iso):
     """«2026-10-24T15:36:00.000Z» → Toshkent sanasi «2026-10-24» (platforma ham kuratorning mahalliy sanasini oladi)."""
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TOSHKENT).date().isoformat()
+
+
+def xat_qatorlari(r):
+    """runQuery javobidan yangi xatlar (xabar yuborilmagan va kurator hali o'qimagan)."""
+    natija = []
+    for x in r:
+        d = x.get("document")
+        if not d:
+            continue
+        f = d.get("fields", {})
+        if (f.get("xabar") or {}).get("booleanValue") or (f.get("oqildi") or {}).get("booleanValue"):
+            continue
+        natija.append({"nom": d["name"], **{k: fs_matn(f.get(k)) or "" for k in ("sahifa", "sana", "sabab", "matn")}})
+    return natija
+
+
+def xat_matni(x, baza):
+    """Kuratorga (Saqlangan xabarlar): kim, qaysi dars, sababi. O'quvchi sahifa kaliti bo'yicha topiladi."""
+    import html as H
+
+    o = next((q for q in baza.get("oquvchilar", []) if q.get("sahifaKalit") == x["sahifa"]), None)
+    g = next((q for q in baza.get("guruhlar", []) if o and q.get("id") == o.get("guruhId")), None)
+    kim = f"{o.get('ism', '')} ({g.get('nom', '')})" if o and g else (o or {}).get("ism") or "O'quvchi (topilmadi)"
+    sana = f"{x['sana'][8:10]}.{x['sana'][5:7]}" if len(x.get("sana", "")) == 10 else x.get("sana", "")
+    qator = [f"<b>O'quvchidan xat:</b> {H.escape(kim, quote=False)}", f"{sana} darsidagi NB — sababi: {H.escape(x.get('sabab') or '-', quote=False)}"]
+    if x.get("matn"):
+        qator.append(f"«{H.escape(x['matn'][:600], quote=False)}»")
+    qator.append("Saytda: Bosh sahifa → «O‘quvchilardan xatlar» (Uzrli / O‘qildi).")
+    return "\n".join(qator)
+
+
+def oquvchi_testlari(oynalar, sid, kun=45, bugun=None):
+    """O'quvchining platformadagi testlari (imtihon oynalari, oxirgi `kun` kun): sana (ochilgan kun, Toshkent), dars nomi,
+    holat va foiz — sayt o'quvchi sahifasiga qo'yadi (har darsning test natijasi)."""
+    bugun = bugun or datetime.now(TOSHKENT).date()
+    chegara = (bugun - timedelta(days=kun)).isoformat()
+    r = []
+    for w in oynalar:
+        if w.get("studentId") != sid or not w.get("openFrom"):
+            continue
+        try:
+            sana = mahalliy_sana(w["openFrom"])
+        except ValueError:
+            continue
+        if sana < chegara:
+            continue
+        f = w.get("scorePercent")
+        r.append({"sana": sana, "dars": str(w.get("lessonTitle") or "")[:80], "holat": str(w.get("status") or ""), "foiz": round(float(f)) if isinstance(f, (int, float)) else None, "gacha": str(w.get("openTo") or "")})
+    return sorted(r, key=lambda x: x["sana"])[-40:]
 
 
 def html_qatorlar(html):
@@ -614,10 +674,11 @@ class Platforma:
             m = re.search(r'"students":\[\{"id".*?\]\}', s)
             if not m:
                 continue
+            oynalar = json_keyin(s, "initialWindows") or []
             for x in json.loads(s[m.start() + len('"students":'):m.end() - 1]):
                 k = s.find(f'/student/{x["id"]}"')
                 tel = re.findall(r'"children":"(\+998\d{9})"', s[max(0, k - 1500):k]) if k >= 0 else []
-                oquvchilar.append({"platformaUuid": x["id"], "ism": (x.get("fullName") or "").strip(), "telefon": tel[-1] if tel else "", "guruhPlatformaId": g["id"]})
+                oquvchilar.append({"platformaUuid": x["id"], "ism": (x.get("fullName") or "").strip(), "telefon": tel[-1] if tel else "", "guruhPlatformaId": g["id"], "testlar": oquvchi_testlari(oynalar, x["id"])})
             guruhlar.append({"platformaId": g["id"], "nom": g["nom"], "kunlar": g.get("Kunlar"), "vaqt": g.get("Vaqti")})
         sahifalar = []
         for n in range(1, 60):
@@ -2085,9 +2146,23 @@ async def bulut_tsikli(men):
     global BULUT
     b = BULUT = Bulut(C["bulut"])
     keyingi_belgi, keyingi_platforma, keyingi_hisobot, keyingi_nazorat = 0, time.time() + 60, time.time() + 90, time.time() + 120
-    keyingi_eslatma = time.time() + 150
+    keyingi_eslatma, keyingi_xat = time.time() + 150, time.time() + 30
     while True:
         try:
+            if time.time() >= keyingi_xat:
+                # O'quvchilar saytidan NB uchun yozilgan xatlar — kuratorning Saqlangan xabarlariga (bir marta).
+                keyingi_xat = time.time() + 120
+                try:
+                    xatlar = await asyncio.to_thread(b.yangi_xatlar)
+                    if xatlar:
+                        baza = await asyncio.to_thread(b.yozuvlar, 1)
+                        for x in xatlar:
+                            await bitta_yubor("me", xat_matni(x, baza))
+                            await asyncio.to_thread(b.xat_yuborildi, x["nom"])
+                            print(f"O'quvchidan xat Saqlangan xabarlarga yuborildi ({x['sana']}).")
+                except Exception as e:  # noqa: BLE001
+                    print("O'quvchi xatlari olinmadi:", str(e)[:200])
+                    keyingi_xat = time.time() + 900
             if time.time() >= keyingi_nazorat:
                 # Kuratorlar nazorati: har kuni 00:30 dan keyin kechagi kun — KM kuratorlar guruhiga (faqat boshliq akkaunti).
                 keyingi_nazorat = time.time() + 300
