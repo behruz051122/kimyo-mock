@@ -1541,6 +1541,50 @@ async def marshrut(usul, yol, sarlavha, tana):
             except Exception:  # noqa: BLE001
                 pass
         return 200, {"ok": True, "tashladi": list(kim.values())}
+    if usul == "POST" and u.path == "/konspekt-reaksiya":
+        # Baholangan konspekt: o'quvchining «dan»dan keyingi rasm/fayl xabarlariga reaksiya (🔥/👍/👌).
+        from telethon import functions, types
+        d = json.loads(tana or b"{}")
+        ent = await chat_ol(d.get("chat", ""))
+        if ent == "me":
+            raise ValueError("Guruh tanlanishi kerak")
+        dan = datetime.fromtimestamp((d.get("dan") or 0) / 1000, tz=timezone.utc)
+        qabul = [x for x in d.get("qabul", []) if isinstance(x, dict)][:80]
+        by_id = {str(x.get("id")): x for x in qabul if x.get("id")}
+        by_un = {str(x.get("username")).lstrip("@").lower(): x for x in qabul if x.get("username")}
+        xabarlar = {}
+        async for m in client.iter_messages(ent, limit=1500):
+            if m.date < dan:
+                break
+            if m.out or not m.sender_id or not (m.photo or m.document):
+                continue
+            q = by_id.get(str(m.sender_id))
+            if not q and by_un:
+                try:
+                    e = await m.get_sender()
+                    q = by_un.get((getattr(e, "username", None) or "").lower())
+                except Exception:  # noqa: BLE001
+                    q = None
+            if q:
+                xabarlar.setdefault(q.get("k"), (q, []))[1].append(m.id)
+        natija = []
+        for q in qabul:
+            if q.get("k") not in xabarlar:
+                natija.append({"k": q.get("k"), "holat": "topilmadi"})
+                continue
+            _, ids = xabarlar[q.get("k")]
+            soni = 0
+            for mid in ids[:6]:
+                try:
+                    await client(functions.messages.SendReactionRequest(peer=ent, msg_id=mid, reaction=[types.ReactionEmoji(emoticon=q.get("emoji") or "👍")]))
+                    soni += 1
+                    await asyncio.sleep(random.uniform(0.6, 1.2))
+                except errors.FloodWaitError as e:
+                    await asyncio.sleep(min(e.seconds, 30) + 1)
+                except Exception as e:  # noqa: BLE001 — guruhda bu reaksiya o'chirilgan bo'lishi mumkin
+                    print("  reaksiya qo'yilmadi:", e)
+            natija.append({"k": q.get("k"), "holat": "ok" if soni else "xato", "soni": soni})
+        return 200, {"ok": True, "natija": natija}
     if usul == "POST" and u.path == "/nb-javoblar":
         # Kelmaganlar NB xabariga nima deb javob yozgani: «dan» (ms) dan keyingi kiruvchi shaxsiy xabarlar (o'qiladi, yuborilmaydi).
         d = json.loads(tana or b"{}")
@@ -1807,6 +1851,177 @@ def test_eslatma_matni(x, oynalar, hozir_ms):
     ])
 
 
+def _davomat(d, oid):
+    v = (d.get("davomat") or {}).get(oid)
+    if v:
+        return v
+    return {"holat": "sababsiz"} if oid in (d.get("yoqlar") or []) else {"holat": "bor"}
+
+
+def xavf_royxati(baza, bugun):
+    """Saytdagi «Ketish xavfi» (engine/xavf.ts) ning qisqa nusxasi: ketma-ket/oxirgi uzrsiz NB, davomat <40%."""
+    gnom = {g["id"]: g.get("nom", "") for g in baza.get("guruhlar", [])}
+    darslar = {}
+    for d in baza.get("darslar", []):
+        if d.get("holat") == "yakunlangan":
+            darslar.setdefault(d.get("guruhId"), []).append(d)
+    for v in darslar.values():
+        v.sort(key=lambda d: d.get("sana", ""), reverse=True)
+    out = []
+    for o in baza.get("oquvchilar", []):
+        if not o.get("faol") or o.get("chiqqanSana") or o.get("guruhId") not in gnom:
+            continue
+        ds = [d for d in darslar.get(o["guruhId"], []) if o["id"] in (d.get("tartib") or [])][:6]
+        hs = [_davomat(d, o["id"]) for d in ds]
+        ketma = 0
+        for h in hs:
+            if h.get("holat") != "sababsiz":
+                break
+            ketma += 1
+        sabab, ball = [], 0
+        if ketma >= 2:
+            sabab.append(f"{ketma} dars ketma-ket NB")
+            ball += 40 + ketma * 10
+        elif ketma == 1:
+            sabab.append("oxirgi darsda NB")
+            ball += 30
+        if len(ds) >= 3:
+            foiz = round(sum(1 for h in hs if h.get("holat") == "bor") * 100 / len(ds))
+            if foiz < 40:
+                sabab.append(f"davomat {foiz}%")
+                ball += 25
+        if not sabab:
+            continue
+        q = o.get("qongiroq")
+        if q and (datetime.now(timezone.utc).timestamp() * 1000 - q) < 3 * 86400000:
+            yangi = any(h.get("holat") == "sababsiz" and (d.get("tugash") or d.get("boshlanish") or 0) > q for d, h in zip(ds, hs))
+            if not yangi:
+                continue
+        out.append((ball, o.get("ism", ""), gnom.get(o["guruhId"], ""), ", ".join(sabab)))
+    return sorted(out, key=lambda x: (-x[0], x[1]))
+
+
+def brifing_matni(baza, bugun):
+    """Ertalabki brifing (FAQAT kuratorning o'ziga — to'lov ma'lumoti bor): bugungi darslar, kimga qo'ng'iroq, to'lovi yaqinlar."""
+    b = bugun.isoformat()
+    oq = baza.get("oquvchilar", [])
+    sanoq = Counter(o.get("guruhId") for o in oq if o.get("faol"))
+    darslar = sorted([(jadval_vaqti(g.get("vaqt"))[0], g) for g in baza.get("guruhlar", []) if sanoq.get(g.get("id")) and rejadami(g, b)], key=lambda x: x[0])
+    q = [f"☀️ <b>Xayrli tong! {bugun.strftime('%d.%m')} — kun rejasi</b>", ""]
+    if darslar:
+        q.append("<b>Bugungi darslar:</b>")
+        q += [f"• {_soat(t)} — {_hq(g.get('nom', ''))} ({sanoq.get(g.get('id'))} o‘quvchi)" for t, g in darslar]
+    else:
+        q.append("Bugun jadval bo‘yicha dars yo‘q.")
+    xv = xavf_royxati(baza, b)
+    if xv:
+        q += ["", f"<b>📞 Qo‘ng‘iroq qiling ({len(xv)}):</b>"]
+        q += [f"• {_hq(i)} <i>({_hq(g)})</i> — {_hq(s)}" for _, i, g, s in xv[:10]]
+        if len(xv) > 10:
+            q.append(f"… yana {len(xv) - 10} ta — saytda «Ketish xavfi».")
+    gacha = (bugun + timedelta(days=3)).isoformat()
+    tol = sorted([o for o in oq if o.get("faol") and not o.get("chiqqanSana") and b <= (o.get("tolovTugash") or "") <= gacha], key=lambda o: o["tolovTugash"])
+    if tol:
+        q += ["", f"<b>💳 To‘lov muddati yaqin ({len(tol)}):</b>"]
+        q += [f"• {_hq(o.get('ism', ''))} — {o['tolovTugash'][8:10]}.{o['tolovTugash'][5:7]}" for o in tol[:10]]
+        yoq = [o for o in tol if o.get("rivojXat") != o.get("tolovTugash") and (o.get("telegramId") or o.get("username"))]
+        if yoq:
+            q.append(f"✉️ {len(yoq)} tasiga «Rivojlanish xati» hali yuborilmagan — saytdagi bosh sahifada bitta tugma.")
+    eslatma = [x for x in C.get("eslatmalar", []) if int(x.get("qachon", 0)) > time.time() * 1000]
+    if eslatma:
+        q += ["", f"🧪 Bugun 13:00 da {len(eslatma)} ta guruhga «testni yechmaganlar» eslatmasi ketadi."]
+    return "\n".join(q)
+
+
+def brifing_vaqtimi(hozir, oxirgi):
+    """09:00–12:00 oralig'ida kuniga bir marta."""
+    if not (9 <= hozir.hour < 12):
+        return None
+    k = hozir.date().isoformat()
+    return None if k == oxirgi else k
+
+
+async def ertalabki_brifing():
+    baza = await asyncio.to_thread(BULUT.yozuvlar)
+    soz = next(iter(baza.get("sozlamalar", [])), {})
+    if soz.get("ertalabkiBrifing") is False:
+        return False
+    await bitta_yubor("me", brifing_matni(baza, datetime.now(TOSHKENT).date()))
+    return True
+
+
+def qarz_vaqtimi(hozir, oxirgi):
+    """Yakshanba 18:00 dan keyin, haftada bir marta (kalit — yakshanba sanasi)."""
+    if hozir.weekday() != 6 or hozir.hour < 18:
+        return None
+    k = hozir.date().isoformat()
+    return None if k == oxirgi else k
+
+
+def _iso_ms(t):
+    try:
+        return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return 0
+
+
+def test_qarzlari(oynalar, sid, hozir_ms):
+    """O'quvchining shu hafta muddati o'tib ketgan, yechilmagan testlari (shu dars uchun yechilgan/ochiq oyna yo'q)."""
+    hafta = hozir_ms - 7 * 86400000
+    ozi = [w for w in oynalar if w.get("studentId") == sid]
+    yechilgan = {w.get("lessonId") for w in ozi if w.get("status") == "FINISHED" or _iso_ms(w.get("openTo")) > hozir_ms}
+    qarz = {}
+    for w in ozi:
+        if w.get("status") != "FINISHED" and hafta <= _iso_ms(w.get("openTo")) <= hozir_ms and w.get("lessonId") not in yechilgan:
+            qarz[w["lessonId"]] = w.get("lessonTitle") or ""
+    return qarz
+
+
+async def haftalik_test_qarzi():
+    """Yakshanba: shu hafta yechilmay qolgan testlarni 48 soatga qayta ochib, har o'quvchiga shaxsan ro'yxat."""
+    baza = await asyncio.to_thread(BULUT.yozuvlar, 2)
+    soz = next(iter(baza.get("sozlamalar", [])), {})
+    if soz.get("testQarzi") is False:
+        return 0
+    hozir = int(time.time() * 1000)
+    tugash = datetime.fromtimestamp(hozir / 1000 + 48 * 3600, TOSHKENT)
+    jami = 0
+    for g in baza.get("guruhlar", []):
+        if not g.get("telegramChat") or not g.get("platformaId"):
+            continue
+        gidlar = {g["platformaId"]: g["telegramChat"], **{k: v.get("chat") for k, v in (g.get("qoshimchaChat") or {}).items() if v.get("chat")}}
+        for gid, chat in gidlar.items():
+            oq = [o for o in baza.get("oquvchilar", []) if o.get("guruhId") == g["id"] and o.get("faol") and o.get("platformaUuid") and (o.get("platformaGuruh") or g["platformaId"]) == gid]
+            if not oq:
+                continue
+            try:
+                oyn = (await asyncio.to_thread(PLATFORMA.guruh, gid))["oynalar"]
+            except Exception as e:  # noqa: BLE001
+                print("Test qarzi: platforma —", e)
+                continue
+            items, qabul = [], []
+            for o in oq:
+                qarz = test_qarzlari(oyn, o["platformaUuid"], hozir)
+                if not qarz:
+                    continue
+                items += [{"studentId": o["platformaUuid"], "lessonId": lid} for lid in qarz]
+                if o.get("telegramId") or o.get("username"):
+                    ism = "" if (o.get("ism") or "").startswith("Ismsiz") else o.get("ism", "")
+                    ruy = "\n".join(f"• {t}" for t in list(qarz.values())[:8])
+                    qabul.append({"k": o["id"], "id": o.get("telegramId"), "username": o.get("username"), "xabarlar": [
+                        f"Assalomu alaykum{', ' + ism if ism else ''}!\nBu hafta yechilmay qolgan testlaringiz:\n{ruy}\n\nUlarni yana 48 soatga ochib qo‘ydim — {tugash.strftime('%d.%m')} soat {tugash.strftime('%H:%M')} gacha yechib qo‘ying. Test natijasi umumiy bahoga kiradi."]})
+            if not items:
+                continue
+            z = lambda t: t.isoformat().replace("+00:00", "Z")  # noqa: E731
+            hz = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+            st, _, txt = await asyncio.to_thread(PLATFORMA._so, "POST", "/api/curator/lesson-exam-windows/bulk", {"groupId": gid, "items": items, "openFrom": z(hz), "openTo": z(hz + timedelta(hours=48))})
+            print(f"Test qarzi ({g.get('nom')}): {len(items)} ta test qayta ochildi ({st})")
+            if qabul and 200 <= st < 300:
+                await marshrut("POST", "/shaxsiy", {"x-spektr-kalit": C["kalit"]}, json.dumps({"chat": chat, "qabul": qabul}).encode())
+                jami += len(qabul)
+    return jami
+
+
 async def test_eslatmalar():
     """Vaqti kelgan eslatmalar: platformadan holatni olib, yechmaganlarni guruhda belgilaydi."""
     if not PLATFORMA or not C.get("eslatmalar"):
@@ -1870,6 +2085,25 @@ async def bulut_tsikli(men):
             if time.time() >= keyingi_eslatma:
                 keyingi_eslatma = time.time() + 300
                 await test_eslatmalar()
+                hozir_t = datetime.now(TOSHKENT)
+                k = brifing_vaqtimi(hozir_t, C.get("brifingSana"))
+                if k:
+                    try:
+                        if await ertalabki_brifing():
+                            print("Ertalabki brifing Saqlangan xabarlarga yuborildi.")
+                        C["brifingSana"] = k
+                        SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+                    except Exception as e:  # noqa: BLE001
+                        print("Ertalabki brifing yuborilmadi:", e)
+                k = qarz_vaqtimi(hozir_t, C.get("qarzHafta")) if PLATFORMA else None
+                if k:
+                    try:
+                        n = await haftalik_test_qarzi()
+                        print(f"Haftalik test qarzi: {n} o‘quvchiga yozildi.")
+                        C["qarzHafta"] = k
+                        SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+                    except Exception as e:  # noqa: BLE001
+                        print("Haftalik test qarzi bajarilmadi:", e)
 
             if time.time() >= keyingi_hisobot:
                 keyingi_hisobot = time.time() + 600

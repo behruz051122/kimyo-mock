@@ -429,7 +429,8 @@ def pdf_yasa(d, tx):
         kon = o.get("konspekt") or {}
         sat.append([
             Nishon(orin),
-            [Paragraph(m(o.get("ism", "")), QALIN)] + ([Paragraph(m(o["kurs"]), KICHIK)] if individual and o.get("kurs") else []),
+            [Paragraph(m(o.get("ism", "")), QALIN)] + ([Paragraph(m(o["kurs"]), KICHIK)] if individual and o.get("kurs") else [])
+            + ([Paragraph(f"<font color='#EA580C'>{m('Seriya: ' + str(o['seriya']) + ' dars ketma-ket')}</font>", KICHIK)] if (o.get("seriya") or 0) >= 3 else []),
             Bar((b or 0) / 100, 36 * mm),
             Paragraph(f"<font name='{shq}' size='12' color='{rang_ball(b or 0).hexval()}'>{'—' if b is None else b}</font>", ust("bb", l=14)),
             Paragraph(f"<font color='#16A34A'>{son('berdi')}</font>  ·  <font color='#D97706'>{son('chala')}</font>  ·  <font color='#DC2626'>{son('berolmadi')}</font>", MATN),
@@ -444,6 +445,11 @@ def pdf_yasa(d, tx):
             st.append(("BACKGROUND", (0, i), (-1, i), H(["#FFFBEB", "#F8FAFC", "#FFF7ED"][orin - 1])))
     rt.setStyle(TableStyle(st))
     hikoya.append(rt)
+
+    yt = d.get("yetakchilar") or []
+    if yt:
+        qatorlar = [Paragraph(m(f"{i}. {x['ism']} — {x['ball']} ball ({x['darslar']} dars)"), MATN) for i, x in enumerate(yt, 1)]
+        hikoya += [Spacer(0, 8), karta("Haftaning yetakchilari (oxirgi 7 kun)", qatorlar, R["sariq"], R["sariq_f"])]
 
     bandlar = [("A’lo", "85–100", lambda v: v >= 85, R["yashil"], R["yashil_f"]), ("Yaxshi", "70–84", lambda v: 70 <= v < 85, R["brend2"], R["kok_f"]),
                ("Qoniqarli", "50–69", lambda v: 50 <= v < 70, R["sariq"], R["sariq_f"]), ("Past", "0–49", lambda v: v < 50, R["qizil"], R["qizil_f"])]
