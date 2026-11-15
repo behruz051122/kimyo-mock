@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.11"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.15"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -1455,7 +1455,18 @@ async def marshrut(usul, yol, sarlavha, tana):
         # Dars boshida (kurator rozi bo'lsa): har o'quvchiga bugungi mavzusi testini ochish.
         if not PLATFORMA:
             return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan: kompyuterda «python3 spektr_telegram.py --platforma» bilan qayta ishga tushiring."}
-        return 200, await asyncio.to_thread(PLATFORMA.test_och, json.loads(tana or b"{}"))
+        d = json.loads(tana or b"{}")
+        r = await asyncio.to_thread(PLATFORMA.test_och, d)
+        e = d.get("eslatma")
+        if isinstance(e, dict) and e.get("chat") and e.get("qachon") and r.get("ok") is not False:
+            # Ertasi kuni testni hali yechmaganlarni guruhda eslatish (bulut_tsikli tekshiradi).
+            ruy = [x for x in C.get("eslatmalar", []) if not (x.get("guruh") == d.get("guruh") and x.get("chat") == e["chat"] and abs(int(x.get("qachon", 0)) - int(e["qachon"])) < 6 * 3600 * 1000)]
+            ruy.append({"guruh": str(d.get("guruh")), "chat": str(e["chat"]), "qachon": int(e["qachon"]), "vaqt": int(time.time() * 1000), "nom": str(e.get("nom") or ""),
+                        "oquvchilar": [{"sid": str(o.get("studentId")), "ism": str(o.get("ism") or ""), "username": o.get("username"), "telegramId": o.get("telegramId")} for o in e.get("oquvchilar") or [] if o.get("studentId")]})
+            C["eslatmalar"] = ruy[-40:]
+            SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+            r["eslatma"] = True
+        return 200, r
     if usul == "POST" and u.path == "/platforma/ballar":
         # Xolislik indeksi: guruhning platformadagi baholari (og'zaki theoryScore va test examScore) — dars nomlari bilan.
         if not PLATFORMA:
@@ -1758,10 +1769,77 @@ async def ishla(reader, writer):
     writer.close()
 
 
+def _hq(x):
+    return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _belgila(o):
+    if o.get("username"):
+        return "@" + _hq(str(o["username"]).lstrip("@"))
+    if str(o.get("telegramId") or "").isdigit():
+        return f'<a href="tg://user?id={o["telegramId"]}">{_hq(o.get("ism") or "O‘quvchi")}</a>'
+    return f"<b>{_hq(o.get('ism') or 'O‘quvchi')}</b>"
+
+
+def test_eslatma_matni(x, oynalar, hozir_ms):
+    """Testni hali yechmaganlar (oyna ochiq, FINISHED emas) — guruhga eslatma matni yoki None."""
+    def ms(t):
+        try:
+            return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return 0
+    bosh = int(x.get("vaqt", 0)) - 72 * 3600 * 1000
+    qolgan, tugash = [], []
+    for o in x.get("oquvchilar") or []:
+        ochiq = [w for w in oynalar if w.get("studentId") == o["sid"] and w.get("status") != "FINISHED" and ms(w.get("openTo")) > hozir_ms and ms(w.get("openFrom")) >= bosh]
+        if ochiq:
+            qolgan.append(o)
+            tugash.append(min(ms(w.get("openTo")) for w in ochiq))
+    if not qolgan:
+        return None
+    t = datetime.fromtimestamp(min(tugash) / 1000, TOSHKENT)
+    return "\n".join([
+        "Assalomu alaykum. Kechagi dars testini hali yechmaganlar:",
+        "",
+        "<blockquote>" + "\n".join(_belgila(o) for o in qolgan) + "</blockquote>",
+        "",
+        f"Test platformada <b>{t.strftime('%d.%m')} soat {t.strftime('%H:%M')}</b> gacha ochiq. Bugun yechib qo‘ying — natija reytingga kiradi.",
+    ])
+
+
+async def test_eslatmalar():
+    """Vaqti kelgan eslatmalar: platformadan holatni olib, yechmaganlarni guruhda belgilaydi."""
+    if not PLATFORMA or not C.get("eslatmalar"):
+        return
+    hozir = int(time.time() * 1000)
+    qoldi, ozgardi = [], False
+    for x in C["eslatmalar"]:
+        if int(x.get("qachon", 0)) > hozir:
+            qoldi.append(x)
+            continue
+        ozgardi = True
+        if hozir - int(x["qachon"]) > 6 * 3600 * 1000:
+            continue  # juda kech (kompyuter o'chiq bo'lgan) — yubormaymiz
+        try:
+            g = await asyncio.to_thread(PLATFORMA.guruh, x["guruh"])
+            matn = test_eslatma_matni(x, g["oynalar"], hozir)
+            if matn:
+                ent = await chat_ol(x["chat"])
+                await client.get_participants(ent)
+                await bitta_yubor(ent, matn)
+                print(f"Test eslatmasi yuborildi: {x.get('nom') or x['chat']}")
+        except Exception as e:  # noqa: BLE001
+            print("Test eslatmasi yuborilmadi:", e)
+    if ozgardi:
+        C["eslatmalar"] = qoldi
+        SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+
+
 async def bulut_tsikli(men):
     global BULUT
     b = BULUT = Bulut(C["bulut"])
     keyingi_belgi, keyingi_platforma, keyingi_hisobot, keyingi_nazorat = 0, time.time() + 60, time.time() + 90, time.time() + 120
+    keyingi_eslatma = time.time() + 150
     while True:
         try:
             if time.time() >= keyingi_nazorat:
@@ -1788,6 +1866,10 @@ async def bulut_tsikli(men):
                         keyingi_nazorat = time.time() + 1800
                     else:
                         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+
+            if time.time() >= keyingi_eslatma:
+                keyingi_eslatma = time.time() + 300
+                await test_eslatmalar()
 
             if time.time() >= keyingi_hisobot:
                 keyingi_hisobot = time.time() + 600
