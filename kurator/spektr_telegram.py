@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.15f"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.15g"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2134,7 +2134,9 @@ async def haftalik_test_qarzi():
     """Yakshanba: shu hafta yechilmay qolgan testlarni 48 soatga qayta ochib, har o'quvchiga shaxsan ro'yxat."""
     baza = await asyncio.to_thread(BULUT.yozuvlar, 9)
     soz = next(iter(baza.get("sozlamalar", [])), {})
-    if soz.get("testQarzi") is False:
+    # Kurator qarori (15.11): har kuni saytdagi «Testni yechmaganlar» ro'yxatidan, ptichka bilan — yakshanbadagi
+    # avtomatik ochish endi faqat Sozlamalarda ataylab yoqilsa (testQarzi: true).
+    if soz.get("testQarzi") is not True:
         return 0
     hozir = int(time.time() * 1000)
     tugash = datetime.fromtimestamp(hozir / 1000 + 48 * 3600, TOSHKENT)
