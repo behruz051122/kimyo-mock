@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.15e"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.15f"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -1528,6 +1528,42 @@ async def marshrut(usul, yol, sarlavha, tana):
             SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
             r["eslatma"] = True
         return 200, r
+    if usul == "POST" and u.path == "/test-qarz/royxat":
+        # Kunlik: ochilganiga bir sutkadan oshgan, yechilmagan testlar (kurator saytida ro'yxat, ptichkalar bilan).
+        if not PLATFORMA:
+            return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan."}
+        d = json.loads(tana or b"{}")
+        hozir = int(time.time() * 1000)
+        natija = {}
+        for gid in [str(x) for x in d.get("guruhlar") or []][:12]:
+            oyn = (await asyncio.to_thread(PLATFORMA.guruh, gid))["oynalar"]
+            sidlar = sorted({w.get("studentId") for w in oyn if w.get("studentId")})
+            natija[gid] = [{"sid": sid, "darslar": [{"id": k, **v} for k, v in q.items()]} for sid in sidlar if (q := kunlik_qarzlar(oyn, sid, hozir, int(d.get("soat") or 24)))]
+        return 200, {"ok": True, "guruhlar": natija}
+    if usul == "POST" and u.path == "/test-qarz/och":
+        # Kurator tanlaganlarga: testni yana 24 soatga ochish va shaxsan yozish (Telegram ulanmaganlarga — faqat ochiladi).
+        if not PLATFORMA:
+            return 400, {"ok": False, "xato": "Platforma paroli kiritilmagan."}
+        d = json.loads(tana or b"{}")
+        gid, chat = str(d.get("guruh") or ""), str(d.get("chat") or "")
+        soat = max(1, min(72, int(d.get("soat") or 24)))
+        oq = [o for o in d.get("oquvchilar") or [] if o.get("sid") and o.get("darslar")][:80]
+        items = [{"studentId": o["sid"], "lessonId": lid} for o in oq for lid in o["darslar"]]
+        if not gid or not items:
+            return 400, {"ok": False, "xato": "Ochiladigan test yo'q."}
+        z = lambda t: t.isoformat().replace("+00:00", "Z")  # noqa: E731
+        hz = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        st, _, txt = await asyncio.to_thread(PLATFORMA._so, "POST", "/api/curator/lesson-exam-windows/bulk", {"groupId": gid, "items": items, "openFrom": z(hz), "openTo": z(hz + timedelta(hours=soat))})
+        if not 200 <= st < 300:
+            return 200, {"ok": False, "xato": f"Platforma testni ochmadi ({st}): {str(txt)[:200]}"}
+        tugash = datetime.fromtimestamp(time.time() + soat * 3600, TOSHKENT)
+        qabul = [{"k": o.get("k"), "id": o.get("telegramId"), "username": o.get("username"), "xabarlar": [qarz_xabari(o.get("nomlar") or [], tugash)]} for o in oq if o.get("telegramId") or o.get("username")]
+        yuborildi = 0
+        if qabul and chat:
+            _, r = await marshrut("POST", "/shaxsiy", {"x-spektr-kalit": C["kalit"]}, json.dumps({"chat": chat, "qabul": qabul}).encode())
+            yuborildi = sum(1 for x in (r.get("natija") or []) if x.get("holat") == "ok")
+        print(f"Test qarzi (kunlik): {len(items)} ta test ochildi, {yuborildi} ta xabar")
+        return 200, {"ok": True, "ochildi": len(items), "yuborildi": yuborildi, "tugash": int(tugash.timestamp() * 1000)}
     if usul == "POST" and u.path == "/platforma/ballar":
         # Xolislik indeksi: guruhning platformadagi baholari (og'zaki theoryScore va test examScore) — dars nomlari bilan.
         if not PLATFORMA:
@@ -2060,6 +2096,31 @@ def test_qarzlari(oynalar, sid, hozir_ms):
         if w.get("status") != "FINISHED" and hafta <= _iso_ms(w.get("openTo")) <= hozir_ms and w.get("lessonId") not in yechilgan:
             qarz[w["lessonId"]] = w.get("lessonTitle") or ""
     return qarz
+
+
+def kunlik_qarzlar(oynalar, sid, hozir_ms, soat=24, kun=7):
+    """Ochilganiga `soat` dan oshgan, hali yechilmagan testlar (oxirgi `kun` kunda). Shu dars yechilgan yoki
+    qayta ochilib hozir ochiq turgan bo'lsa — qarz emas. → {lessonId: {"nom", "ochilgan" (ms)}}"""
+    ozi = [w for w in oynalar if w.get("studentId") == sid]
+    yechilgan = {w.get("lessonId") for w in ozi if w.get("status") == "FINISHED"}
+    qarz = {}
+    for w in sorted(ozi, key=lambda x: _iso_ms(x.get("openFrom"))):
+        lid, bosh = w.get("lessonId"), _iso_ms(w.get("openFrom"))
+        if not lid or lid in yechilgan or w.get("status") == "FINISHED" or bosh < hozir_ms - kun * 86400000:
+            continue
+        if bosh > hozir_ms - soat * 3600000:
+            qarz.pop(lid, None)  # yaqinda (qayta) ochilgan — hali vaqti bor
+            continue
+        qarz[lid] = {"nom": (w.get("lessonTitle") or "").strip(), "ochilgan": bosh}
+    return qarz
+
+
+def qarz_xabari(nomlar, tugash):
+    """O'quvchiga shaxsan (odam yozgandek, salomlashish va ismsiz)."""
+    nomlar = [(t.split("|", 1)[1] if "|" in t else t).strip() for t in nomlar if t][:6]
+    ruy = nomlar[0] if len(nomlar) == 1 else ", ".join(nomlar[:-1]) + " va " + nomlar[-1]
+    nima = "testingiz" if len(nomlar) == 1 else f"{len(nomlar)} ta testingiz"
+    return f"{ruy} — {nima} hali yechilmagan ekan. Yana bir kunga ochib qo‘ydim, {tugash.strftime('%d.%m')} kuni soat {tugash.strftime('%H:%M')} gacha ishlab qo‘ying."
 
 
 def qarz_guruhlari(baza, bugun):
