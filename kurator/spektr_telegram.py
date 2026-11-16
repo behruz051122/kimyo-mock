@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.16c"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.17b"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -332,7 +332,9 @@ class Bulut:
             if not d:
                 continue
             f = d.get("fields", {})
-            ishlar.append({"nom": d["name"], "vaqt": d["updateTime"], "yol": fs_matn(f.get("yol")) or "", "usul": fs_matn(f.get("usul")) or "GET", "tana": fs_matn(f.get("tana"))})
+            qv = f.get("qv", {})
+            qv = int(float(qv.get("integerValue") or qv.get("doubleValue") or 0))
+            ishlar.append({"nom": d["name"], "vaqt": d["updateTime"], "yol": fs_matn(f.get("yol")) or "", "usul": fs_matn(f.get("usul")) or "GET", "tana": fs_matn(f.get("tana")), "qv": qv})
         return ishlar
 
     def ol(self, ish):
@@ -1440,6 +1442,38 @@ async def natija_fayl_yubor(d):
     return {"ok": True, "yuborildi": 1, "fayl": nom}
 
 
+def matn_norm(s):
+    """Taqqoslash uchun: HTML teglari va belgilari olib tashlanadi, bo'shliqlar bittaga."""
+    import html as H
+
+    return " ".join(H.unescape(re.sub(r"<[^>]+>", "", s or "")).split())
+
+
+def takrorlar(xabarlar, oyna_s=3 * 3600, eng_kam=15):
+    """Bir suhbatdagi O'ZIMIZ yuborgan bir xil matnli xabarlar: birinchisi qoladi, undan `oyna_s` ichida
+    yuborilgan keyingi nusxalar — o'chiriladigan id'lar. xabarlar: [{id, out, t (soniya), matn}]."""
+    birinchi, ochir = {}, []
+    for x in sorted(xabarlar, key=lambda x: (x["t"], x["id"])):
+        m = matn_norm(x.get("matn"))
+        if not x.get("out") or len(m) < eng_kam:
+            continue
+        if m in birinchi and x["t"] - birinchi[m] <= oyna_s:
+            ochir.append(x["id"])
+        else:
+            birinchi[m] = x["t"]
+    return ochir
+
+
+def oldin_yuborilganmi(xabarlar, matn, hozir_s, oyna_s):
+    """Shu matn (normallashgan) bizdan oxirgi `oyna_s` ichida ketganmi — takror yuborilmasin."""
+    m = matn_norm(matn)
+    return len(m) >= 15 and any(x.get("out") and hozir_s - x["t"] <= oyna_s and matn_norm(x.get("matn")) == m for x in xabarlar)
+
+
+async def oxirgi_xabarlar(kimga, limit):
+    return [{"id": m.id, "out": m.out, "t": m.date.timestamp(), "matn": m.message or ""} async for m in client.iter_messages(kimga, limit=limit)]
+
+
 async def bitta_yubor(kimga, matn):
     """Bitta xabar: qisqa FloodWait'ni kutib, 3 marta urinadi; uzun kutish (5 daqiqadan ko'p) — xato."""
     for _ in range(3):
@@ -1772,13 +1806,18 @@ async def marshrut(usul, yol, sarlavha, tana):
         if ent != "me":
             # tg://user?id= belgilashlari ishlashi uchun a'zolar keshga olinadi.
             await client.get_participants(ent)
-        n = 0
+        n = takror = 0
+        oldingi = await oxirgi_xabarlar(ent, 20) if ent != "me" else []
         for x in xabarlar:
+            if oldin_yuborilganmi(oldingi, x, time.time(), 6 * 3600):
+                takror += 1
+                print("  takror — guruhga qayta yuborilmadi")
+                continue
             await bitta_yubor(ent, x)
             n += 1
             print(f"  yuborildi {n}/{len(xabarlar)}")
             await asyncio.sleep(1.2)
-        return 200, {"ok": True, "yuborildi": n}
+        return 200, {"ok": True, "yuborildi": n, "takror": takror}
     if usul == "POST" and u.path == "/natija-fayl":
         # Guruhga bitta PDF: 1-bet reyting, keyin har o'quvchining beti, tahlil va qarzdorlik (natija_fayl.py).
         d = json.loads(tana or b"{}")
@@ -1808,7 +1847,14 @@ async def marshrut(usul, yol, sarlavha, tana):
                 continue
             xabarlar = [x for x in q.get("xabarlar", []) if isinstance(x, str) and x.strip()][:10]
             try:
-                for x in xabarlar:
+                # Shu xabar oxirgi 24 soatda allaqachon ketgan bo'lsa (tugma ikki marta bosilgan) — qayta yuborilmaydi.
+                oldingi = await oxirgi_xabarlar(a, 15)
+                yangi = [x for x in xabarlar if not oldin_yuborilganmi(oldingi, x, time.time(), 24 * 3600)]
+                if not yangi:
+                    natija.append({"k": k, "holat": "ok", "takror": True})
+                    print(f"  shaxsan {i + 1}/{len(qabul)}: {a.first_name or a.id} — avval yuborilgan, takrorlanmadi")
+                    continue
+                for x in yangi:
                     await bitta_yubor(a, x)
                 natija.append({"k": k, "holat": "ok"})
                 print(f"  shaxsan {i + 1}/{len(qabul)}: {a.first_name or a.id}")
@@ -1822,6 +1868,40 @@ async def marshrut(usul, yol, sarlavha, tana):
             if i < len(qabul) - 1:
                 await asyncio.sleep(random.uniform(*SHAXSIY_PAUZA))
         return 200, {"ok": True, "natija": natija}
+    if usul == "POST" and u.path == "/takror-ochir":
+        # Ikki marta ketgan shaxsiy xabarlarning ortiqcha nusxasini (ikkala tomondan) o'chirish. ochir=false — faqat ro'yxat.
+        d = json.loads(tana or b"{}")
+        soat = max(1, min(48, int(d.get("soat") or 24)))
+        ochir = d.get("ochir") is True
+        chegara = datetime.now(timezone.utc) - timedelta(hours=soat)
+        yozilmasin = {str(x) for x in C.get("yozilmasin", [])}
+        men_id = (await client.get_me()).id
+        natija, jami = [], 0
+        async for dlg in client.iter_dialogs(limit=400):
+            if not dlg.date or dlg.date < chegara:
+                continue  # (qadalgan suhbatlar tepada turadi — shuning uchun «break» emas)
+            e = dlg.entity
+            if not dlg.is_user or getattr(e, "bot", False) or e.id == men_id or str(e.id) in yozilmasin:
+                continue
+            xs = [x for x in await oxirgi_xabarlar(e, 40) if x["t"] >= chegara.timestamp()]
+            ids = takrorlar(xs)
+            if not ids:
+                continue
+            nusxa = next(x["matn"] for x in xs if x["id"] == ids[0])
+            q = {"ism": " ".join(x for x in [e.first_name, e.last_name] if x) or e.username or str(e.id), "soni": len(ids), "matn": matn_norm(nusxa)[:70]}
+            if ochir:
+                try:
+                    await client.delete_messages(e, ids, revoke=True)
+                    q["ochirildi"] = True
+                except errors.FloodWaitError as fe:
+                    natija.append({**q, "xato": f"Telegram cheklovi {fe.seconds} s"})
+                    return 200, {"ok": True, "natija": natija, "jami": jami, "toxtadi": True}
+                except Exception as ex:  # noqa: BLE001
+                    q["xato"] = str(ex)[:120]
+                await asyncio.sleep(random.uniform(1, 2))
+            jami += len(ids)
+            natija.append(q)
+        return 200, {"ok": True, "natija": natija, "jami": jami, "ochirildi": ochir}
     if usul == "POST" and u.path == "/ochir":
         # Shu guruh a'zolariga «dan» (ms) dan keyin O'ZIMIZ yozgan shaxsiy xabarlarni ikkala tomondan o'chirish.
         d = json.loads(tana or b"{}")
@@ -2103,6 +2183,41 @@ def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
 
 
 ESLATMA_KESH = {"vaqt": 0.0, "baza": None}
+ESKIRISH_SONIYA = 12 * 3600  # navbatdagi so'rov shundan eski bo'lsa — bajarilmaydi
+SEKIN_ORALIQ = 30  # soniya: dars bo'lmagan paytda navbat shunchalik kam tekshiriladi (bulut limitini tejash)
+
+
+def eskirganmi(ish, hozir_s):
+    """Saytda bosilganidan (qurilma vaqti `qv`) 12 soatdan oshgan so'rov. `qv` yo'q (eski sayt) — eskirgan emas."""
+    return bool(ish.get("qv")) and hozir_s - ish["qv"] / 1000 > ESKIRISH_SONIYA
+
+
+def dars_oynasidami(baza, hozir, oldin=30, keyin=180):
+    """Biror guruhning bugungi darsi boshlanishiga `oldin` daqiqa qolgandan `keyin` daqiqa o'tguncha."""
+    bugun = hozir.date().isoformat()
+    daq = hozir.hour * 60 + hozir.minute
+    for g in baza.get("guruhlar", []):
+        kochir = g.get("kochirishlar") or []
+        yangi = next((k for k in kochir if k.get("yangi") == bugun), None)
+        v = None
+        if yangi:
+            v = jadval_vaqti(yangi.get("vaqt"))
+        elif rejadami(g, bugun) and not any(k.get("eski") == bugun for k in kochir):
+            v = jadval_vaqti(g.get("vaqt"))
+        if v and -oldin <= daq - v[0] <= keyin:
+            return True
+    return False
+
+
+def navbat_oraligi(baza, hozir, ishsiz_s):
+    """Navbat qanchada bir tekshiriladi: dars paytida, oxirgi 15 daqiqada ish bo'lgan yoki jadval hali o'qilmagan bo'lsa —
+    tez (8 s); qolgan vaqtda sekin (30 s). Bo'sh so'rov ham bulutning kunlik limitidan bitta o'qish oladi."""
+    if baza is None or ishsiz_s < 900:
+        return NAVBAT_ORALIGI
+    try:
+        return NAVBAT_ORALIGI if dars_oynasidami(baza, hozir) else SEKIN_ORALIQ
+    except Exception:  # noqa: BLE001 — jadvalda kutilmagan qiymat: tez rejim xavfsizroq
+        return NAVBAT_ORALIGI
 ESLATMA_KESH_SONIYA = 3 * 3600  # jadval (guruh kunlari/vaqti) kamdan-kam o'zgaradi
 
 
@@ -2344,6 +2459,7 @@ async def bulut_tsikli(men):
     b = BULUT = Bulut(C["bulut"])
     keyingi_belgi, keyingi_platforma, keyingi_hisobot, keyingi_nazorat = 0, time.time() + 60, time.time() + 90, time.time() + 120
     keyingi_eslatma, keyingi_xat, keyingi_dars = time.time() + 150, time.time() + 30, time.time() + 45
+    oxirgi_ish = time.time()
     while True:
         try:
             kalit_o = osish_vaqtimi(datetime.now(TOSHKENT), C.get("osishHafta"))
@@ -2452,7 +2568,7 @@ async def bulut_tsikli(men):
                     await tg_ulan()
                 except Exception as e:  # noqa: BLE001 — internet yo'q: belgida ko'rinadi, keyingi safar yana urinadi
                     print("Telegramga ulanib bo'lmadi:", e)
-                await asyncio.to_thread(b.belgi, men, platforma=bool(PLATFORMA), platformaVaqt=int(HOLAT_P["vaqt"] * 1000), platformaXato=HOLAT_P["xato"], telegram=client.is_connected())
+                await asyncio.to_thread(b.belgi, men, kalit=C["kalit"], platforma=bool(PLATFORMA), platformaVaqt=int(HOLAT_P["vaqt"] * 1000), platformaXato=HOLAT_P["xato"], telegram=client.is_connected())
                 keyingi_belgi = time.time() + BELGI_ORALIGI
             if PLATFORMA and time.time() >= keyingi_platforma:
                 # Platformadan yangi ma'lumot (o'quvchilar, to'lov sanalari, komissiya) — sayt o'zi qo'llaydi.
@@ -2470,6 +2586,13 @@ async def bulut_tsikli(men):
             for ish in await asyncio.to_thread(b.navbat):
                 if not await asyncio.to_thread(b.ol, ish):
                     continue
+                oxirgi_ish = time.time()
+                if eskirganmi(ish, time.time()):
+                    # Bulutga kech yetgan (internet yo'q edi yoki kunlik limit tugagan edi) — bajarilmaydi: kurator
+                    # o'shanda qayta bosgan bo'lishi mumkin, xabar ikki marta ketmasin.
+                    print(f"Eskirgan so'rov bajarilmadi: {ish['yol']}")
+                    await asyncio.to_thread(b.tugat, ish, 410, {"ok": False, "xato": "Eskirgan so‘rov (12 soatdan oldin bosilgan) — kerak bo‘lsa qayta bosing."})
+                    continue
                 print(f"Bulutdan so'rov: {ish['yol']}")
                 try:
                     tana = ish["tana"].encode("utf-8") if ish["tana"] else b""
@@ -2479,9 +2602,14 @@ async def bulut_tsikli(men):
                 await asyncio.to_thread(b.tugat, ish, status, data)
                 print(f"  tayyor ({status})")
         except Exception as e:  # noqa: BLE001
-            print("Bulut xatosi:", e)
-            await asyncio.sleep(20)
-        await asyncio.sleep(NAVBAT_ORALIGI)
+            if "(429)" in str(e):
+                # Firestore kunlik bepul limiti tugagan: tez-tez urinish foydasiz (Toshkent ~13:00 da tiklanadi).
+                print("Bulut: kunlik limit tugagan (429) — 10 daqiqadan keyin yana urinaman. Sayt shu kompyuterda Chrome’da bulutsiz ishlaydi.")
+                await asyncio.sleep(600)
+            else:
+                print("Bulut xatosi:", e)
+                await asyncio.sleep(20)
+        await asyncio.sleep(navbat_oraligi(ESLATMA_KESH["baza"], datetime.now(TOSHKENT), time.time() - oxirgi_ish))
 
 
 async def main():
