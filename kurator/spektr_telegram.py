@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.17b"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.17c"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2135,8 +2135,31 @@ def brifing_matni(baza, bugun):
 
 
 ESLATMA_ODDIY = ["Bugun soat {t} da dars bor, kutib qolamiz.", "Eslatma: bugun {t} da darsimiz bor, kechikmang.", "Bugun {t} da darsda ko‘rishamiz."]
+ESLATMA_GURUH = ["Bugun soat {t} da darsimiz bor, kechikmang.", "Eslatma: bugun {t} da dars. Kutib qolamiz!", "Bugun {t} da darsda ko‘rishamiz, kechikmasdan kiring."]
 ESLATMA_NB = ["Bugun soat {t} da dars bor. O‘tgan safar ko‘rinmadingiz — bugun albatta qo‘shiling, kutamiz.",
               "Bugun {t} da dars. Oldingi darsni qoldirgandingiz, bugungisini o‘tkazib yubormang."]
+
+
+JURNAL = []  # yordamchi nima qildi — saytda «Yordamchi jurnali» (oxirgi 60 ta, bulutga BELGI bilan birga yoziladi)
+JURNAL_YOZILGAN = {"n": -1}
+
+
+def qayd(*qism):
+    """Terminalga chiqaradi va jurnalga yozadi. Ketma-ket bir xil yozuv — bitta (soni oshadi)."""
+    m = " ".join(str(x) for x in qism).strip()
+    print(m)
+    t = int(time.time() * 1000)
+    if JURNAL and JURNAL[-1]["m"] == m[:240]:
+        JURNAL[-1].update(t=t, n=JURNAL[-1].get("n", 1) + 1)
+    else:
+        JURNAL.append({"t": t, "m": m[:240]})
+        del JURNAL[:-60]
+    JURNAL_YOZILGAN["ozgardi"] = True
+
+
+def guruh_eslatma_matni(x):
+    """Guruhga bitta eslatma (insondek, kun sayin har xil): x — dars_eslatmalari() qatori."""
+    return ESLATMA_GURUH[sum(map(ord, x["kalit"])) % len(ESLATMA_GURUH)].format(t=x["t"])
 
 
 def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
@@ -2178,7 +2201,7 @@ def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
             matn = shablon[sum(map(ord, o["id"] + bugun)) % len(shablon)].format(t=t)
             chatlar.setdefault(chat or g["telegramChat"], []).append({"k": o["id"], "id": o.get("telegramId"), "username": o.get("username"), "xabarlar": [matn]})
         for chat, qabul in chatlar.items():
-            natija.append({"kalit": f"{g['id']}|{bugun}|{chat}", "chat": chat, "qabul": qabul, "guruh": g.get("nom", "")})
+            natija.append({"kalit": f"{g['id']}|{bugun}|{chat}", "chat": chat, "qabul": qabul, "guruh": g.get("nom", ""), "t": t})
     return natija
 
 
@@ -2242,9 +2265,10 @@ async def dars_eslatmasi():
         yuborilgan.append(x["kalit"])
         del yuborilgan[:-60]
         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
-        await marshrut("POST", "/shaxsiy", {"x-spektr-kalit": C["kalit"]}, json.dumps({"chat": x["chat"], "qabul": x["qabul"]}).encode())
-        print(f"Dars eslatmasi: {x['guruh']} — {len(x['qabul'])} o'quvchiga")
-        jami += len(x["qabul"])
+        # Kurator qarori: eslatma guruhga bitta xabar (lichkaga faqat NB xabari boradi — akkaunt spam cheklovidan asraladi).
+        await bitta_yubor(await chat_ol(x["chat"]), guruh_eslatma_matni(x))
+        qayd(f"Dars eslatmasi guruhga: {x['guruh']}")
+        jami += 1
     return jami
 
 
@@ -2399,7 +2423,7 @@ async def haftalik_test_qarzi():
             try:
                 oyn = (await asyncio.to_thread(PLATFORMA.guruh, gid))["oynalar"]
             except Exception as e:  # noqa: BLE001
-                print("Test qarzi: platforma —", e)
+                qayd("Test qarzi: platforma —", e)
                 continue
             items, qabul = [], []
             for o in oq:
@@ -2419,7 +2443,7 @@ async def haftalik_test_qarzi():
             z = lambda t: t.isoformat().replace("+00:00", "Z")  # noqa: E731
             hz = datetime.now(timezone.utc).replace(second=0, microsecond=0)
             st, _, txt = await asyncio.to_thread(PLATFORMA._so, "POST", "/api/curator/lesson-exam-windows/bulk", {"groupId": gid, "items": items, "openFrom": z(hz), "openTo": z(hz + timedelta(hours=48))})
-            print(f"Test qarzi ({g.get('nom')}): {len(items)} ta test qayta ochildi ({st})")
+            qayd(f"Test qarzi ({g.get('nom')}): {len(items)} ta test qayta ochildi ({st})")
             if qabul and 200 <= st < 300:
                 await marshrut("POST", "/shaxsiy", {"x-spektr-kalit": C["kalit"]}, json.dumps({"chat": chat, "qabul": qabul}).encode())
                 jami += len(qabul)
@@ -2446,9 +2470,9 @@ async def test_eslatmalar():
                 ent = await chat_ol(x["chat"])
                 await client.get_participants(ent)
                 await bitta_yubor(ent, matn)
-                print(f"Test eslatmasi yuborildi: {x.get('nom') or x['chat']}")
+                qayd(f"Test eslatmasi yuborildi: {x.get('nom') or x['chat']}")
         except Exception as e:  # noqa: BLE001
-            print("Test eslatmasi yuborilmadi:", e)
+            qayd("Test eslatmasi yuborilmadi:", e)
     if ozgardi:
         C["eslatmalar"] = qoldi
         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
@@ -2473,17 +2497,17 @@ async def bulut_tsikli(men):
                     if next(iter(baza_o.get("sozlamalar", [])), {}).get("osishEloni") is not False:
                         for x in osish_eloni(baza_o, datetime.now(TOSHKENT).date()):
                             await bitta_yubor(await chat_ol(x["chat"]), H.escape(x["matn"], quote=False))
-                            print(f"Haftalik o‘sish e’loni: {x['guruh']}")
+                            qayd(f"Haftalik o‘sish e’loni: {x['guruh']}")
                             await asyncio.sleep(2)
                 except Exception as e:  # noqa: BLE001
-                    print("O‘sish e’loni yuborilmadi:", str(e)[:200])
+                    qayd("O‘sish e’loni yuborilmadi:", str(e)[:200])
             if time.time() >= keyingi_dars:
                 # Dars boshlanishidan ~30 daqiqa oldin har o'quvchiga shaxsan eslatma.
                 keyingi_dars = time.time() + 240
                 try:
                     await dars_eslatmasi()
                 except Exception as e:  # noqa: BLE001
-                    print("Dars eslatmasi yuborilmadi:", str(e)[:200])
+                    qayd("Dars eslatmasi yuborilmadi:", str(e)[:200])
             if time.time() >= keyingi_xat:
                 # O'quvchilar saytidan NB uchun yozilgan xatlar — kuratorning Saqlangan xabarlariga (bir marta).
                 keyingi_xat = time.time() + 600
@@ -2494,9 +2518,9 @@ async def bulut_tsikli(men):
                         for x in xatlar:
                             await bitta_yubor("me", xat_matni(x, baza))
                             await asyncio.to_thread(b.xat_yuborildi, x["nom"])
-                            print(f"O'quvchidan xat Saqlangan xabarlarga yuborildi ({x['sana']}).")
+                            qayd(f"O'quvchidan xat Saqlangan xabarlarga yuborildi ({x['sana']}).")
                 except Exception as e:  # noqa: BLE001
-                    print("O'quvchi xatlari olinmadi:", str(e)[:200])
+                    qayd("O'quvchi xatlari olinmadi:", str(e)[:200])
                     keyingi_xat = time.time() + 900
             if time.time() >= keyingi_nazorat:
                 # Kuratorlar nazorati: har kuni 00:30 dan keyin kechagi kun — KM kuratorlar guruhiga (faqat boshliq akkaunti).
@@ -2506,19 +2530,19 @@ async def bulut_tsikli(men):
                     try:
                         r = await nazorat_hisobot(sana, True, avto=True)
                         if r["xabarlar"]:
-                            print(f"Kuratorlar nazorati ({sana}) KM kuratorlar guruhiga yuborildi.")
+                            qayd(f"Kuratorlar nazorati ({sana}) KM kuratorlar guruhiga yuborildi.")
                         # Oyning 1-kuni — o'tgan oy uchun oylik hisobot ham.
                         oy = sana[:7]
                         if (date_iso(sana) + timedelta(days=1)).day == 1 and C.get("nazoratOy") != oy:
                             r = await nazorat_hisobot(sana, True, avto=True, oy=oy)
                             if r["xabarlar"]:
-                                print(f"Oylik hisobot ({oy}) KM kuratorlar guruhiga yuborildi.")
+                                qayd(f"Oylik hisobot ({oy}) KM kuratorlar guruhiga yuborildi.")
                             C["nazoratOy"] = oy
                         C["nazoratSana"] = sana
                     except PermissionError:
                         C["nazoratSana"] = sana  # boshliq emas — bugun qayta urinilmaydi
                     except Exception as e:  # noqa: BLE001
-                        print("Kuratorlar nazorati yuborilmadi:", e)
+                        qayd("Kuratorlar nazorati yuborilmadi:", e)
                         keyingi_nazorat = time.time() + 1800
                     else:
                         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
@@ -2531,20 +2555,20 @@ async def bulut_tsikli(men):
                 if k:
                     try:
                         if await ertalabki_brifing():
-                            print("Ertalabki brifing Saqlangan xabarlarga yuborildi.")
+                            qayd("Ertalabki brifing Saqlangan xabarlarga yuborildi.")
                         C["brifingSana"] = k
                         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
                     except Exception as e:  # noqa: BLE001
-                        print("Ertalabki brifing yuborilmadi:", e)
+                        qayd("Ertalabki brifing yuborilmadi:", e)
                 k = qarz_vaqtimi(hozir_t, C.get("qarzHafta")) if PLATFORMA else None
                 if k:
                     try:
                         n = await haftalik_test_qarzi()
-                        print(f"Haftalik test qarzi: {n} o‘quvchiga yozildi.")
+                        qayd(f"Haftalik test qarzi: {n} o‘quvchiga yozildi.")
                         C["qarzHafta"] = k
                         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
                     except Exception as e:  # noqa: BLE001
-                        print("Haftalik test qarzi bajarilmadi:", e)
+                        qayd("Haftalik test qarzi bajarilmadi:", e)
 
             if time.time() >= keyingi_hisobot:
                 keyingi_hisobot = time.time() + 600
@@ -2556,18 +2580,20 @@ async def bulut_tsikli(men):
                             for x in r["xabarlar"]:
                                 await bitta_yubor("me", x)
                                 await asyncio.sleep(1)
-                            print("Haftalik hisobot Saqlangan xabarlarga yuborildi.")
+                            qayd("Haftalik hisobot Saqlangan xabarlarga yuborildi.")
                         C["hisobotHafta"] = kalit
                         SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
                     except Exception as e:  # noqa: BLE001
-                        print("Haftalik hisobot yuborilmadi:", e)
+                        qayd("Haftalik hisobot yuborilmadi:", e)
                         keyingi_hisobot = time.time() + 1800
 
             if time.time() >= keyingi_belgi:
                 try:
                     await tg_ulan()
                 except Exception as e:  # noqa: BLE001 — internet yo'q: belgida ko'rinadi, keyingi safar yana urinadi
-                    print("Telegramga ulanib bo'lmadi:", e)
+                    qayd("Telegramga ulanib bo'lmadi:", e)
+                if JURNAL_YOZILGAN.pop("ozgardi", False):
+                    await asyncio.to_thread(b._yoz, f"{b.nom}/yordamchi/jurnal", {"j": json.dumps(JURNAL, ensure_ascii=False), "vaqt": datetime.now(timezone.utc)})
                 await asyncio.to_thread(b.belgi, men, kalit=C["kalit"], platforma=bool(PLATFORMA), platformaVaqt=int(HOLAT_P["vaqt"] * 1000), platformaXato=HOLAT_P["xato"], telegram=client.is_connected())
                 keyingi_belgi = time.time() + BELGI_ORALIGI
             if PLATFORMA and time.time() >= keyingi_platforma:
@@ -2577,11 +2603,11 @@ async def bulut_tsikli(men):
                     await asyncio.to_thread(b.platforma_yoz, malumot)
                     HOLAT_P.update(vaqt=time.time(), xato="", malumot=malumot)
                     keyingi_platforma = time.time() + PLATFORMA_ORALIGI
-                    print(f"Platformadan yangilandi: {len(malumot['guruhlar'])} guruh, {len(malumot['oquvchilar'])} o'quvchi")
+                    qayd(f"Platformadan yangilandi: {len(malumot['guruhlar'])} guruh, {len(malumot['oquvchilar'])} o'quvchi")
                 except Exception as e:  # noqa: BLE001
                     HOLAT_P["xato"] = str(e)[:200]
                     keyingi_platforma = time.time() + 1800
-                    print("Platformadan yangilab bo'lmadi:", e)
+                    qayd("Platformadan yangilab bo'lmadi:", e)
                 keyingi_belgi = 0
             for ish in await asyncio.to_thread(b.navbat):
                 if not await asyncio.to_thread(b.ol, ish):
@@ -2590,7 +2616,7 @@ async def bulut_tsikli(men):
                 if eskirganmi(ish, time.time()):
                     # Bulutga kech yetgan (internet yo'q edi yoki kunlik limit tugagan edi) — bajarilmaydi: kurator
                     # o'shanda qayta bosgan bo'lishi mumkin, xabar ikki marta ketmasin.
-                    print(f"Eskirgan so'rov bajarilmadi: {ish['yol']}")
+                    qayd(f"Eskirgan so'rov bajarilmadi: {ish['yol']}")
                     await asyncio.to_thread(b.tugat, ish, 410, {"ok": False, "xato": "Eskirgan so‘rov (12 soatdan oldin bosilgan) — kerak bo‘lsa qayta bosing."})
                     continue
                 print(f"Bulutdan so'rov: {ish['yol']}")
@@ -2600,19 +2626,34 @@ async def bulut_tsikli(men):
                 except Exception as e:  # noqa: BLE001
                     status, data = (400 if isinstance(e, ValueError) else 500), {"ok": False, "xato": str(e)}
                 await asyncio.to_thread(b.tugat, ish, status, data)
-                print(f"  tayyor ({status})")
+                qayd(f"Saytdan so‘rov {ish['yol']}: " + ("bajarildi" if status == 200 else f"xato ({status}) — {str(data.get('xato') or '')[:120]}"))
         except Exception as e:  # noqa: BLE001
             if "(429)" in str(e):
                 # Firestore kunlik bepul limiti tugagan: tez-tez urinish foydasiz (Toshkent ~13:00 da tiklanadi).
-                print("Bulut: kunlik limit tugagan (429) — 10 daqiqadan keyin yana urinaman. Sayt shu kompyuterda Chrome’da bulutsiz ishlaydi.")
+                qayd("Bulut: kunlik limit tugagan (429) — 10 daqiqadan keyin yana urinaman. Sayt shu kompyuterda Chrome’da bulutsiz ishlaydi.")
                 await asyncio.sleep(600)
             else:
-                print("Bulut xatosi:", e)
+                qayd("Bulut xatosi:", e)
                 await asyncio.sleep(20)
         await asyncio.sleep(navbat_oraligi(ESLATMA_KESH["baza"], datetime.now(TOSHKENT), time.time() - oxirgi_ish))
 
 
+def uygoq_tut():
+    """Bepul «doim yoniq»: Mac'da yordamchi ishlab turganda kompyuter uxlab qolmaydi (ekran o'chsa ham).
+    caffeinate yordamchi jarayoniga bog'lanadi (-w) — yordamchi to'xtasa, o'zi ham tugaydi."""
+    if sys.platform != "darwin" or not shutil.which("caffeinate"):
+        return
+    try:
+        import subprocess
+
+        subprocess.Popen(["caffeinate", "-is", "-w", str(os.getpid())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(" Mac uxlab qolmaydi (yordamchi ishlab turganda).")
+    except Exception as e:  # noqa: BLE001
+        print(" caffeinate ishga tushmadi:", e)
+
+
 async def main():
+    uygoq_tut()
     await client.connect()
     if not await client.is_user_authorized():
         print("Telegramga kirish kerak (bir marta): telefon raqam va kod so'raladi.")
