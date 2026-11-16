@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.15g"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.16a"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2054,6 +2054,73 @@ def brifing_matni(baza, bugun):
     return "\n".join(q)
 
 
+ESLATMA_ODDIY = ["Bugun soat {t} da dars bor, kutib qolamiz.", "Eslatma: bugun {t} da darsimiz bor, kechikmang.", "Bugun {t} da darsda ko‘rishamiz."]
+ESLATMA_NB = ["Bugun soat {t} da dars bor. O‘tgan safar ko‘rinmadingiz — bugun albatta qo‘shiling, kutamiz.",
+              "Bugun {t} da dars. Oldingi darsni qoldirgandingiz, bugungisini o‘tkazib yubormang."]
+
+
+def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
+    """Dars boshlanishiga 25–40 daqiqa qolgan guruhlar: har o'quvchiga shaxsan qisqa eslatma (salomlashish va ismsiz).
+    Oxirgi darsida uzrsiz NB bo'lganga — boshqa matn. Ko'chirilgan darslar hisobga olinadi. → [{kalit, chat, qabul}]"""
+    bugun = hozir.date().isoformat()
+    daq = hozir.hour * 60 + hozir.minute
+    darslar = {}
+    for d in baza.get("darslar", []):
+        if d.get("holat") == "yakunlangan":
+            darslar.setdefault(d.get("guruhId"), []).append(d)
+    natija = []
+    for g in baza.get("guruhlar", []):
+        if not g.get("telegramChat"):
+            continue
+        kochir = g.get("kochirishlar") or []
+        bosh = None
+        yangi = next((k for k in kochir if k.get("yangi") == bugun), None)
+        if yangi:
+            v = jadval_vaqti(yangi.get("vaqt"))
+            bosh = v[0] if v else None
+        elif rejadami(g, bugun) and not any(k.get("eski") == bugun for k in kochir):
+            bosh = jadval_vaqti(g.get("vaqt"))[0]
+        if bosh is None or not (oldin[0] <= bosh - daq <= oldin[1]):
+            continue
+        oxirgi = sorted(darslar.get(g["id"], []), key=lambda d: (d.get("sana") or "", d.get("boshlanish") or 0))
+        if oxirgi and oxirgi[-1].get("sana") == bugun:
+            continue  # bugun dars allaqachon o'tgan
+        t = _soat(bosh)
+        chatlar = {}
+        for o in baza.get("oquvchilar", []):
+            if o.get("guruhId") != g["id"] or not o.get("faol") or not (o.get("telegramId") or o.get("username")):
+                continue
+            pg = o.get("platformaGuruh")
+            chat = ((g.get("qoshimchaChat") or {}).get(pg) or {}).get("chat") if pg and pg != g.get("platformaId") else None
+            ozi = [d for d in oxirgi if o["id"] in (d.get("tartib") or [])]
+            nb = bool(ozi) and _davomat(ozi[-1], o["id"]).get("holat") == "sababsiz"
+            shablon = ESLATMA_NB if nb else ESLATMA_ODDIY
+            matn = shablon[sum(map(ord, o["id"] + bugun)) % len(shablon)].format(t=t)
+            chatlar.setdefault(chat or g["telegramChat"], []).append({"k": o["id"], "id": o.get("telegramId"), "username": o.get("username"), "xabarlar": [matn]})
+        for chat, qabul in chatlar.items():
+            natija.append({"kalit": f"{g['id']}|{bugun}|{chat}", "chat": chat, "qabul": qabul, "guruh": g.get("nom", "")})
+    return natija
+
+
+async def dars_eslatmasi():
+    baza = await asyncio.to_thread(BULUT.yozuvlar, 3)
+    soz = next(iter(baza.get("sozlamalar", [])), {})
+    if soz.get("darsEslatma") is False:
+        return 0
+    yuborilgan = C.setdefault("darsEslatmalar", [])
+    jami = 0
+    for x in dars_eslatmalari(baza, datetime.now(TOSHKENT)):
+        if x["kalit"] in yuborilgan:
+            continue
+        yuborilgan.append(x["kalit"])
+        del yuborilgan[:-60]
+        SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+        await marshrut("POST", "/shaxsiy", {"x-spektr-kalit": C["kalit"]}, json.dumps({"chat": x["chat"], "qabul": x["qabul"]}).encode())
+        print(f"Dars eslatmasi: {x['guruh']} — {len(x['qabul'])} o'quvchiga")
+        jami += len(x["qabul"])
+    return jami
+
+
 def brifing_vaqtimi(hozir, oxirgi):
     """09:00–12:00 oralig'ida kuniga bir marta."""
     if not (9 <= hozir.hour < 12):
@@ -2209,9 +2276,16 @@ async def bulut_tsikli(men):
     global BULUT
     b = BULUT = Bulut(C["bulut"])
     keyingi_belgi, keyingi_platforma, keyingi_hisobot, keyingi_nazorat = 0, time.time() + 60, time.time() + 90, time.time() + 120
-    keyingi_eslatma, keyingi_xat = time.time() + 150, time.time() + 30
+    keyingi_eslatma, keyingi_xat, keyingi_dars = time.time() + 150, time.time() + 30, time.time() + 45
     while True:
         try:
+            if time.time() >= keyingi_dars:
+                # Dars boshlanishidan ~30 daqiqa oldin har o'quvchiga shaxsan eslatma.
+                keyingi_dars = time.time() + 240
+                try:
+                    await dars_eslatmasi()
+                except Exception as e:  # noqa: BLE001
+                    print("Dars eslatmasi yuborilmadi:", str(e)[:200])
             if time.time() >= keyingi_xat:
                 # O'quvchilar saytidan NB uchun yozilgan xatlar — kuratorning Saqlangan xabarlariga (bir marta).
                 keyingi_xat = time.time() + 120
