@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.16a"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.16b"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2121,6 +2121,61 @@ async def dars_eslatmasi():
     return jami
 
 
+def _qisqa_ism(ism):
+    """«Rahimov Azizbek» → «Azizbek» (guruhga — familiyasiz)."""
+    s = (ism or "").split()
+    if len(s) < 2:
+        return s[0] if s else "O‘quvchi"
+    return s[1] if re.search(r"(ova|yeva|eva|ov|yev|ev)$", s[0], re.I) else s[0]
+
+
+def osish_eloni(baza, bugun, eng_kam=5):
+    """Dushanba: har guruhda shu hafta (oxirgi 7 kun) o'rtacha bali o'tgan haftadagidan eng ko'p o'sgan 3 o'quvchi.
+    → [{guruh, chat, matn}] (o'sgan o'quvchi bo'lmasa — guruh o'tkaziladi)."""
+    b = bugun.isoformat()
+    h1 = (bugun - timedelta(days=7)).isoformat()
+    h2 = (bugun - timedelta(days=14)).isoformat()
+    darslar = {d["id"]: d for d in baza.get("darslar", []) if d.get("holat") == "yakunlangan" and h2 <= (d.get("sana") or "") < b}
+    jb = {}
+    for j in baza.get("jurnal", []):
+        d = darslar.get(j.get("darsId"))
+        if d and j.get("ball") is not None:
+            jb.setdefault((d["guruhId"], j["oquvchiId"], d["id"]), []).append(j)
+    ballar = {}
+    for (gid, oid, did), js in jb.items():
+        w = sum(DARAJA_VAZN.get(j.get("daraja"), 1) for j in js)
+        bal = sum(j["ball"] * DARAJA_VAZN.get(j.get("daraja"), 1) for j in js) / w
+        hafta = "bu" if darslar[did]["sana"] >= h1 else "otgan"
+        ballar.setdefault((gid, oid), {}).setdefault(hafta, []).append(bal)
+    oq = {o["id"]: o for o in baza.get("oquvchilar", []) if o.get("faol")}
+    natija = []
+    for g in baza.get("guruhlar", []):
+        if not g.get("telegramChat"):
+            continue
+        qator = []
+        for (gid, oid), x in ballar.items():
+            if gid != g["id"] or oid not in oq or not x.get("bu") or not x.get("otgan"):
+                continue
+            a, c = sum(x["otgan"]) / len(x["otgan"]), sum(x["bu"]) / len(x["bu"])
+            if c - a >= eng_kam:
+                qator.append((round(c - a), round(a), round(c), _qisqa_ism(oq[oid].get("ism"))))
+        if not qator:
+            continue
+        qator.sort(key=lambda q: (-q[0], q[3]))
+        satr = [f"{n}. {q[3]} — {q[1]} → {q[2]} (+{q[0]})" for n, q in enumerate(qator[:3], 1)]
+        matn = "Bu hafta eng ko‘p o‘sganlar:\n" + "\n".join(satr) + "\n\nBarakalla! Keyingi hafta ro‘yxatda kim bo‘larkin?"
+        natija.append({"guruh": g.get("nom", ""), "chat": g["telegramChat"], "matn": matn})
+    return natija
+
+
+def osish_vaqtimi(hozir, oxirgi):
+    """Dushanba 10:00–14:00, haftada bir marta."""
+    if hozir.weekday() != 0 or not (10 <= hozir.hour < 14):
+        return None
+    k = hozir.date().isoformat()
+    return None if k == oxirgi else k
+
+
 def brifing_vaqtimi(hozir, oxirgi):
     """09:00–12:00 oralig'ida kuniga bir marta."""
     if not (9 <= hozir.hour < 12):
@@ -2279,6 +2334,21 @@ async def bulut_tsikli(men):
     keyingi_eslatma, keyingi_xat, keyingi_dars = time.time() + 150, time.time() + 30, time.time() + 45
     while True:
         try:
+            kalit_o = osish_vaqtimi(datetime.now(TOSHKENT), C.get("osishHafta"))
+            if kalit_o:
+                C["osishHafta"] = kalit_o
+                SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+                try:
+                    import html as H
+
+                    baza_o = await asyncio.to_thread(b.yozuvlar, 15)
+                    if next(iter(baza_o.get("sozlamalar", [])), {}).get("osishEloni") is not False:
+                        for x in osish_eloni(baza_o, datetime.now(TOSHKENT).date()):
+                            await bitta_yubor(await chat_ol(x["chat"]), H.escape(x["matn"], quote=False))
+                            print(f"Haftalik o‘sish e’loni: {x['guruh']}")
+                            await asyncio.sleep(2)
+                except Exception as e:  # noqa: BLE001
+                    print("O‘sish e’loni yuborilmadi:", str(e)[:200])
             if time.time() >= keyingi_dars:
                 # Dars boshlanishidan ~30 daqiqa oldin har o'quvchiga shaxsan eslatma.
                 keyingi_dars = time.time() + 240
