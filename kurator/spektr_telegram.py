@@ -2659,6 +2659,12 @@ async def main():
         print("Telegramga kirish kerak (bir marta): telefon raqam va kod so'raladi.")
         await client.start()
     men = await client.get_me()
+    if "--sozla" in sys.argv:
+        # O'rnatuvchi (ornat.sh): sozlash va Telegramga kirish tugadi — fon rejimi alohida ishga tushiriladi.
+        print(f"Sozlash tugadi: {men.first_name or ''} {men.last_name or ''} (@{men.username or '-'}).")
+        print(f"KALIT: {C['kalit']}")
+        await client.disconnect()
+        return
     await client.get_dialogs()
     server = await asyncio.start_server(ishla, "127.0.0.1", PORT)
     print("=" * 56)
