@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.16b"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.16c"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -345,7 +345,7 @@ class Bulut:
 
     def yangi_xatlar(self):
         """O'quvchilar saytidan kelgan (NB olgan darsi uchun sababi), kuratorga hali yuborilmagan xatlar."""
-        so = {"structuredQuery": {"from": [{"collectionId": "oquvchiXat"}], "where": {"fieldFilter": {"field": {"fieldPath": "kurator"}, "op": "EQUAL", "value": {"stringValue": self.uid}}}, "limit": 100}}
+        so = {"structuredQuery": {"from": [{"collectionId": "oquvchiXat"}], "where": {"fieldFilter": {"field": {"fieldPath": "kurator"}, "op": "EQUAL", "value": {"stringValue": self.uid}}}, "limit": 50}}
         st, r = http("POST", f"{FS_ILDIZ}/v1/{self.hujjatlar}:runQuery", so, self._token())
         if st != 200:
             raise RuntimeError(f"o'quvchi xatlarini o'qib bo'lmadi ({st}): {r}")
@@ -2102,14 +2102,26 @@ def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
     return natija
 
 
+ESLATMA_KESH = {"vaqt": 0.0, "baza": None}
+ESLATMA_KESH_SONIYA = 3 * 3600  # jadval (guruh kunlari/vaqti) kamdan-kam o'zgaradi
+
+
 async def dars_eslatmasi():
+    """Bulutni tejash (Firestore kunlik limiti!): butun baza 3 soatda bir marta o'qiladi; faqat biror guruhning
+    darsiga 25–40 daqiqa qolganda yangisi o'qiladi (davomat va Telegram ma'lumoti aniq bo'lishi uchun)."""
+    if ESLATMA_KESH["baza"] is None or time.time() - ESLATMA_KESH["vaqt"] > ESLATMA_KESH_SONIYA:
+        ESLATMA_KESH.update(baza=await asyncio.to_thread(BULUT.yozuvlar, 3), vaqt=time.time())
+    hozir = datetime.now(TOSHKENT)
+    yuborilgan = C.setdefault("darsEslatmalar", [])
+    if not [x for x in dars_eslatmalari(ESLATMA_KESH["baza"], hozir) if x["kalit"] not in yuborilgan]:
+        return 0
     baza = await asyncio.to_thread(BULUT.yozuvlar, 3)
+    ESLATMA_KESH.update(baza=baza, vaqt=time.time())
     soz = next(iter(baza.get("sozlamalar", [])), {})
     if soz.get("darsEslatma") is False:
         return 0
-    yuborilgan = C.setdefault("darsEslatmalar", [])
     jami = 0
-    for x in dars_eslatmalari(baza, datetime.now(TOSHKENT)):
+    for x in dars_eslatmalari(baza, hozir):
         if x["kalit"] in yuborilgan:
             continue
         yuborilgan.append(x["kalit"])
@@ -2358,7 +2370,7 @@ async def bulut_tsikli(men):
                     print("Dars eslatmasi yuborilmadi:", str(e)[:200])
             if time.time() >= keyingi_xat:
                 # O'quvchilar saytidan NB uchun yozilgan xatlar — kuratorning Saqlangan xabarlariga (bir marta).
-                keyingi_xat = time.time() + 120
+                keyingi_xat = time.time() + 600
                 try:
                     xatlar = await asyncio.to_thread(b.yangi_xatlar)
                     if xatlar:
