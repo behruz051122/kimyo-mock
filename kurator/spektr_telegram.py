@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.17d"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.17e"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -2149,7 +2149,7 @@ def brifing_matni(baza, bugun):
 
 
 ESLATMA_ODDIY = ["Bugun soat {t} da dars bor, kutib qolamiz.", "Eslatma: bugun {t} da darsimiz bor, kechikmang.", "Bugun {t} da darsda ko‘rishamiz."]
-ESLATMA_GURUH = ["Bugun soat {t} da darsimiz bor, kechikmang.", "Eslatma: bugun {t} da dars. Kutib qolamiz!", "Bugun {t} da darsda ko‘rishamiz, kechikmasdan kiring."]
+ESLATMA_GURUH = ["Bugun {t} da darsda ko‘rishamiz, kechikmasdan kiring."]
 ESLATMA_NB = ["Bugun soat {t} da dars bor. O‘tgan safar ko‘rinmadingiz — bugun albatta qo‘shiling, kutamiz.",
               "Bugun {t} da dars. Oldingi darsni qoldirgandingiz, bugungisini o‘tkazib yubormang."]
 
@@ -2172,8 +2172,22 @@ def qayd(*qism):
 
 
 def guruh_eslatma_matni(x):
-    """Guruhga bitta eslatma (insondek, kun sayin har xil): x — dars_eslatmalari() qatori."""
-    return ESLATMA_GURUH[sum(map(ord, x["kalit"])) % len(ESLATMA_GURUH)].format(t=x["t"])
+    """Guruhga bitta eslatma (HTML): matn, hamma o'quvchi belgilanadi (username — @, bo'lmasa ismi bilan havola),
+    oxirida — bugun keladiganlar reaksiya bossin. x — dars_eslatmalari() qatori. Kurator qarori: doim shu ko'rinishda."""
+    import html as H
+
+    bosh = ESLATMA_GURUH[sum(map(ord, x["kalit"])) % len(ESLATMA_GURUH)].format(t=x["t"])
+    belgi = []
+    for q in x.get("qabul") or []:
+        if q.get("username"):
+            belgi.append("@" + H.escape(str(q["username"]).lstrip("@")))
+        elif q.get("id"):
+            belgi.append(f'<a href="tg://user?id={int(q["id"])}">{H.escape(q.get("ism") or "o‘quvchi")}</a>')
+    qism = [H.escape(bosh)]
+    if belgi:
+        qism.append(" ".join(belgi))
+    qism.append("Bugun darsga kiradiganlar shu xabarga 👍 reaksiya bosib qo‘ying.")
+    return "\n\n".join(qism)
 
 
 def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
@@ -2213,7 +2227,7 @@ def dars_eslatmalari(baza, hozir, oldin=(25, 40)):
             nb = bool(ozi) and _davomat(ozi[-1], o["id"]).get("holat") == "sababsiz"
             shablon = ESLATMA_NB if nb else ESLATMA_ODDIY
             matn = shablon[sum(map(ord, o["id"] + bugun)) % len(shablon)].format(t=t)
-            chatlar.setdefault(chat or g["telegramChat"], []).append({"k": o["id"], "id": o.get("telegramId"), "username": o.get("username"), "xabarlar": [matn]})
+            chatlar.setdefault(chat or g["telegramChat"], []).append({"k": o["id"], "id": o.get("telegramId"), "username": o.get("username"), "ism": _qisqa_ism(o.get("ism")), "xabarlar": [matn]})
         for chat, qabul in chatlar.items():
             natija.append({"kalit": f"{g['id']}|{bugun}|{chat}", "chat": chat, "qabul": qabul, "guruh": g.get("nom", ""), "t": t})
     return natija
