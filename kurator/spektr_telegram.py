@@ -69,7 +69,7 @@ except Exception:
 
 from telethon import TelegramClient, errors
 
-VERSIYA = "2026.11.17e"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
+VERSIYA = "2026.11.22a"  # saytdagi «Sozlash holati» shu bilan eski yordamchini taniydi
 PORT = 8765
 # Bitta so'rovda shaxsan yoziladigan odamlar soni va ular orasidagi pauza (soniya) — spam cheklovidan saqlanish uchun.
 SHAXSIY_CHEGARA = 60
@@ -1327,6 +1327,66 @@ async def haftalik_hisobot(yubor):
     return {"ok": True, "xabarlar": xabarlar, "yuborildi": bool(yubor), "yoqilgan": soz.get("haftalikHisobot") is not False}
 
 
+SABAB_NOMI = {"tayyorlanmadi": "tayyorlana olmagan", "internet": "internet", "svet": "svet", "kasal": "kasal", "oilaviy": "oilaviy tadbir",
+              "oqish": "maktab/o'qish", "ish": "ish/mashg'ulot", "safar": "safar", "unutdi": "esdan chiqqan", "qiynalyapti": "qiynalyapti", "boshqa": "boshqa"}
+DARS_HISOBOT_SOAT = 6  # yakunlanganiga shundan ko'p bo'lgan dars hisobotga kirmaydi (birinchi ishga tushganda eski darslar yog'ilmasin)
+
+
+def dars_hisobot_matni(kurator, d):
+    """Bitta yakunlangan dars — boshliqqa (Saqlangan xabarlar). To'lov ma'lumoti yo'q."""
+    t = [f"📋 <b>{_e(kurator)}</b> · {_e(d.get('guruh', ''))} · {_e(d.get('sana', ''))[8:10]}.{_e(d.get('sana', ''))[5:7]}"]
+    bosh = d.get("bosh") or "—"
+    vaqt = f"Reja {d['reja']} · boshladi {bosh}" if d.get("reja") else f"Boshladi {bosh}"
+    if d.get("kech") is not None and d["kech"] > 1:
+        vaqt += f" (<b>{d['kech']} daq kech</b>)"
+    t.append(vaqt + (f" · tugadi {d['oxir']}" if d.get("oxir") else ""))
+    t.append(f"Keldi {d.get('keldi', 0)}/{d.get('jami', 0)} · so'raldi {d.get('soralgan', 0)} · {d.get('savol', 0)} savol · SJ {d.get('sj', 0)} daq"
+             + (f" · ball {d['ball']}" if d.get("ball") is not None else ""))
+    n = d.get("nbIsh")
+    if n:
+        q = [f"{n['aniq']}/{n['kelmagan']} sababi aniq"]
+        if n.get("qongiroq"):
+            q.append(f"{n['qongiroq']} qo'ng'iroq")
+        if n.get("kuzatuv"):
+            q.append(f"kuzatuv qolgan {n['kuzatuv']}")
+        if n.get("umidsiz"):
+            q.append(f"umidsiz {n['umidsiz']}")
+        tf = ", ".join(f"{SABAB_NOMI.get(k, k)}{f' ×{v}' if v > 1 else ''}" for k, v in (n.get("toifa") or {}).items())
+        t.append("NB ishi: " + " · ".join(q) + (f" ({_e(tf)})" if tf else ""))
+    elif d.get("nb"):
+        t.append(f"NB: {d['nb']} kishi")
+    a = d.get("amaliy")
+    if a:
+        t.append(f"Amaliy (PK-1): {a['oquvchi']} o'quvchi, {a['masala']} masala, to'g'ri {a['togri']}")
+    reg = d.get("reg") or {}
+    bandlar = reg.get("bandlar") or []
+    if bandlar:
+        ok = sum(1 for b in bandlar if b.get("holat") == "ok")
+        buz = [f"{b['n']}. {b.get('nom', '')}" for b in bandlar if b.get("holat") == "buzildi"]
+        kut = sum(1 for b in bandlar if b.get("holat") == "kutilmoqda")
+        t.append(f"Reglament: {ok} band joyida" + (f", ⏳ {kut} muddati bor" if kut else "") + (f"\n❗ Buzilgan: {_e('; '.join(buz))}" if buz else ""))
+    yub = [x for x, k in (("shaxsan", "shaxsiy"), ("platforma", "platforma"), ("guruhga", "tg")) if d.get(k)]
+    t.append("Natija yuborildi: " + (", ".join(yub) if yub else "<b>hali yo'q</b>"))
+    return "\n".join(t)
+
+
+def yangi_dars_hisobotlari(kuratorlar, yuborilgan, hozir_ms):
+    """Hisobot yuborilmagan, yaqinda yakunlangan darslar: [(kalit, matn)]."""
+    out = []
+    for k in kuratorlar:
+        ism = (k.get("p") or {}).get("ism") or "Kurator"
+        for d in k.get("darslar", []):
+            if d.get("holat") != "yakunlangan" or not d.get("tugash"):
+                continue
+            if hozir_ms - d["tugash"] > DARS_HISOBOT_SOAT * 3600_000:
+                continue
+            kalit = f"{k['uid']}:{d['id']}"
+            if kalit in yuborilgan:
+                continue
+            out.append((kalit, dars_hisobot_matni(ism, d)))
+    return out
+
+
 async def nazorat_hisobot(sana, yubor, avto=False, oy=None):
     """Kunlik (yoki `oy` berilsa — oylik) nazorat hisoboti (boshliq akkaunti).
     avto — vaqti kelganda: o'chirilgan yoki allaqachon yuborilgan bo'lsa jim o'tadi."""
@@ -2512,6 +2572,7 @@ async def bulut_tsikli(men):
     global BULUT
     b = BULUT = Bulut(C["bulut"])
     keyingi_belgi, keyingi_platforma, keyingi_hisobot, keyingi_nazorat = 0, time.time() + 60, time.time() + 90, time.time() + 120
+    keyingi_dars_hisobot = time.time() + 150
     keyingi_eslatma, keyingi_xat, keyingi_dars = time.time() + 150, time.time() + 30, time.time() + 45
     oxirgi_ish = time.time()
     while True:
@@ -2552,6 +2613,28 @@ async def bulut_tsikli(men):
                 except Exception as e:  # noqa: BLE001
                     qayd("O'quvchi xatlari olinmadi:", str(e)[:200])
                     keyingi_xat = time.time() + 900
+            if time.time() >= keyingi_dars_hisobot and C.get("darsHisobot", True):
+                # Har dars yakunlangach — boshliqqa (faqat boshliq akkaunti) «Saqlangan xabarlar»ga qisqa hisobot.
+                # Faqat 16:00–01:00 oralig'ida, 15 daqiqada bir (kuniga ~40 o'qish × kuratorlar).
+                keyingi_dars_hisobot = time.time() + 900
+                soat_t = datetime.now(TOSHKENT)
+                if (soat_t.hour >= 16 or soat_t.hour < 1) and C.get("darsHisobotYoq") != soat_t.date().isoformat():
+                    try:
+                        bugun = soat_t.date()
+                        kuratorlar = await asyncio.to_thread(BULUT.nazorat, (bugun - timedelta(days=1)).isoformat(), bugun.isoformat())
+                        yuborilgan = set(C.get("darsHisobotlar") or [])
+                        for kalit, matn in yangi_dars_hisobotlari(kuratorlar, yuborilgan, int(time.time() * 1000)):
+                            await bitta_yubor("me", matn)
+                            yuborilgan.add(kalit)
+                            qayd(f"Dars hisoboti Saqlangan xabarlarga yuborildi ({kalit.split(':', 1)[1]}).")
+                            await asyncio.sleep(2)
+                        C["darsHisobotlar"] = sorted(yuborilgan)[-400:]
+                        SOZLAMA.write_text(json.dumps(C, ensure_ascii=False, indent=2), "utf-8")
+                    except PermissionError:
+                        C["darsHisobotYoq"] = soat_t.date().isoformat()  # boshliq emas — bugun qayta urinilmaydi
+                    except Exception as e:  # noqa: BLE001
+                        qayd("Dars hisoboti yuborilmadi:", str(e)[:200])
+                        keyingi_dars_hisobot = time.time() + 1800
             if time.time() >= keyingi_nazorat:
                 # Kuratorlar nazorati: har kuni 00:30 dan keyin kechagi kun — KM kuratorlar guruhiga (faqat boshliq akkaunti).
                 keyingi_nazorat = time.time() + 300
